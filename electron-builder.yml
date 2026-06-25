@@ -1,0 +1,86 @@
+appId: com.ai-shorts-generator.app
+productName: AI Shorts Generator
+copyright: Copyright © 2024
+
+# Output and build resource directories
+directories:
+  buildResources: build
+  output: release
+
+# Files to include in the package
+files:
+  - dist/**/*
+  - renderer/out/**/*
+  - node_modules/**/*
+  - package.json
+  - "!node_modules/.cache/**/*"
+  - "!**/*.map"
+  - "!**/*.d.ts"
+
+# Extra resources bundled alongside the app
+extraResources:
+  - from: resources/
+    to: resources/
+    filter:
+      - "**/*"
+
+# Asset bundling
+asarUnpack:
+  # Native modules must be unpacked from asar
+  - "node_modules/better-sqlite3/**/*"
+  - "node_modules/keytar/**/*"
+  - "node_modules/@mediapipe/**/*"
+  - "resources/**/*"
+  # Renderer static files must be unpacked so the app:// protocol handler
+  # can serve them via net.fetch(file://...) — files inside .asar cannot be
+  # read by the file:// protocol used by net.fetch.
+  - "renderer/out/**/*"
+
+# Windows target
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icon.ico
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+# macOS target
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  icon: build/icon.icns
+  category: public.app-category.video
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+# Linux target
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  icon: build/icons/
+  category: Video
+
+# Publish configuration (optional, for auto-update)
+publish: null
