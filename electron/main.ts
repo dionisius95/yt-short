@@ -461,6 +461,12 @@ Return ONLY a JSON object with this exact format:
     const gameRatio        = (opts['gameRatio']    as import('../shared/types').GameRatio    | undefined) ?? '50-50';
     const gamePosition     = (opts['gamePosition'] as import('../shared/types').GamePosition | undefined) ?? 'top';
     const thumbnailPath    = opts['thumbnailPath'] as string | undefined;
+    const audioMode        = (opts['audioMode'] as 'keep' | 'mute' | 'replace' | undefined)
+      ?? configManager.get('defaultAudioMode') ?? 'keep';
+    const replacementAudioPath = (opts['replacementAudioPath'] as string | undefined)
+      ?? (configManager.get('backgroundMusicPath') || undefined);
+    const musicVolume      = (opts['musicVolume'] as number | undefined)
+      ?? configManager.get('musicVolume') ?? 0.8;
 
     // Reuse existing clip row if provided (prevents orphans on re-generate)
     let clipId: string;
@@ -517,6 +523,9 @@ Return ONLY a JSON object with this exact format:
           gameRatio,
           gamePosition,
           thumbnailPath,
+          audioMode,
+          replacementAudioPath,
+          musicVolume,
         });
 
         clipRepo.updateOutputPath(clipId, outputPath);
@@ -879,8 +888,31 @@ Return ONLY a JSON object with this exact format:
       throw new Error('YouTube credentials are invalid or expired. Please reconnect your account in Settings.');
     }
 
+    // ── Auto source attribution ─────────────────────────────────────────
+    // Append a credit to the original source for non-local (downloaded)
+    // material. This does NOT prevent Content ID claims, but it is good
+    // practice and required for many fair-use / permitted reuses.
+    let uploadReq = req;
+    if (configManager.get('autoAttribution')) {
+      const hookForClip = hookRepo.findById(clip.hookId);
+      const project = hookForClip ? projectRepo.findById(hookForClip.projectId) : null;
+      const sourceUrl = project?.sourceUrl ?? '';
+      const isLocal = /^file:/i.test(sourceUrl);
+      if (project && sourceUrl && !isLocal) {
+        const template = configManager.get('attributionTemplate')
+          || 'Sumber / Source: {title}\n{url}';
+        const credit = template
+          .replace(/\{title\}/g, project.title ?? '')
+          .replace(/\{url\}/g, sourceUrl);
+        const desc = req.description ?? '';
+        if (!desc.includes(sourceUrl)) {
+          uploadReq = { ...req, description: desc ? `${desc}\n\n${credit}` : credit };
+        }
+      }
+    }
+
     const youtubeUrl = await uploader.upload(
-      req,
+      uploadReq,
       clip.outputPath,
       accessToken,
       tokens.refresh_token,

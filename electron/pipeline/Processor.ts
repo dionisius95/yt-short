@@ -52,6 +52,12 @@ export interface ProcessOptions {
   gamePosition?:    GamePosition;
   /** Custom thumbnail image path — prepended as 1-second still frame at start of clip */
   thumbnailPath?:   string;
+  /** Audio treatment: 'keep' (default), 'mute' (strip audio), 'replace' (swap with music). */
+  audioMode?:       'keep' | 'mute' | 'replace';
+  /** Replacement audio/music file path (used when audioMode === 'replace'). */
+  replacementAudioPath?: string;
+  /** Replacement music volume 0.0-1.0 (used when audioMode === 'replace'). Default 0.8. */
+  musicVolume?:     number;
 }
 
 // ---------------------------------------------------------------------------
@@ -136,138 +142,135 @@ function runFfmpegWithProgress(
 /**
  * Build an FFmpeg filter for smooth dynamic subject tracking.
  *
- * Opus-style subject tracking:
- * - Per-frame crop positions from detect_faces.py (dense sampling + EMA smoothed)
- * - FFmpeg `crop` filter with `if()`/`between()` expressions for per-segment positions
- * - Smooth transitions between positions using lerp via `between()` time windows
- * - Falls back to center crop when no face data
+ * CapCut-style auto reframe:
+ * - Per-frame crop positions (cx, cy) from detect_faces.py
+ * - Dynamic crop X AND Y — face is always fully inside the 9:16 frame
+ * - Head-room padding: face center placed at ~35% from top (not centered),
+ *   matching natural portrait framing (eyes in upper third)
+ * - Smooth keyframe interpolation via FFmpeg `if(lt(t,...))` expressions
+ * - Multi-face: zoom out so both faces fit inside the 1080px crop width
  *
- * Source assumed 1920×1080 landscape → output 1080×1920 (9:16).
- * Scale to height=1920 first, then crop 1080 wide.
+ * Source assumed landscape → output 1080×1920 (9:16).
+ *
+ * KEY FIX: crop Y is now dynamic, derived from cy with head-room offset.
+ * Previously crop Y was always 0 (top of frame), causing wajah terpotong.
  */
 function buildCropFilter(cropFrames: CropFrame[], startMs: number, _endMs: number, srcWidth = 1920, srcHeight = 1080): string {
-  // Guard: if the source is already vertical or too narrow to produce a 1080×1920 crop,
-  // scale to fit 1080 width instead and pad/crop height to 1920.
+  // Guard: vertical/square source
   const srcAspect = srcWidth / srcHeight;
   if (srcAspect <= 1.0) {
-    // Source is vertical or square — scale width to 1080, pad height to 1920
     return 'scale=1080:-2,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black';
   }
 
-  // Ensure that scaling to 1920 height produces a frame at least 1080 wide
+  // Guard: source too narrow after scaling to 1920h
   const scaledWidthCheck = Math.round(srcWidth * (1920 / srcHeight));
   if (scaledWidthCheck < 1080) {
-    // Source too narrow after scaling to 1920 height — scale to 1080 width instead
     return 'scale=1080:-2,crop=1080:min(ih\\,1920):0:(ih-min(ih\\,1920))/2,pad=1080:1920:0:(oh-ih)/2:black';
   }
 
   if (cropFrames.length === 0) {
-    return 'scale=-2:1920,crop=1080:1920';
+    return 'scale=-2:1920,crop=1080:1920:(iw-1080)/2:0';
   }
 
-  // All frames where a face/subject was actually detected (hasFace=true)
+  // ── Scale factor: fit source into scaled canvas ──────────────────────────
+  // For multi-face: we may need to zoom out horizontally so both faces fit.
+  // For single face: always scale to exactly 1920h for maximum quality.
   const detectedFrames = cropFrames.filter((f) => f.hasFace);
-
-  // Multi-face span: only frames with faceSpanW > 0 (2+ faces grouped)
   const multiFrames = detectedFrames.filter((f) => (f.faceSpanW ?? 0) > 0);
   let targetScaleH = 1920;
 
   if (multiFrames.length > 0) {
     const spans = multiFrames.map((f) => f.faceSpanW ?? 0).sort((a, b) => a - b);
     const medianSpan = spans[Math.floor(spans.length / 2)];
-    const requiredCropW = Math.round(medianSpan * 1.3);
+    // 1.4× headroom so faces aren't edge-to-edge in the 1080px crop
+    const requiredCropW = Math.round(medianSpan * 1.4);
     if (requiredCropW > 1080) {
       const ratio = 1080 / requiredCropW;
-      // targetScaleH MUST be >= 1920 so crop=1080:1920 is always valid
       targetScaleH = Math.max(1920, Math.round(ratio * 1920));
     }
   }
 
-  // Ensure even number for libx264 compatibility
+  // Even dimensions for libx264
   targetScaleH = targetScaleH % 2 === 0 ? targetScaleH : targetScaleH + 1;
 
   const scaleFactor = targetScaleH / srcHeight;
   const scaledWidth = Math.round(srcWidth * scaleFactor);
-  // Ensure even scaled width, minimum 1080 for 9:16 crop
   const evenScaledWidth = Math.max(1080, scaledWidth % 2 === 0 ? scaledWidth : scaledWidth + 1);
+  const maxScaledH = targetScaleH; // after scale, frame is exactly this tall
 
-  // Use detected frames for crop positions. Fall back to all frames only if nothing detected.
-  // cropFrames always carries a subject-region estimate (avg/rule-of-thirds)
-  // from the Tracker, so using them keeps off-center subjects in frame instead
-  // of collapsing to a hard center crop.
   const useFrames = detectedFrames.length > 0 ? detectedFrames : cropFrames;
 
-  // Safety net: if for any reason useFrames is empty, build a single keyframe
-  // anchored on the average subject X rather than emitting a center crop.
+  // ── Helper: compute crop X for a given frame ────────────────────────────
+  // Keeps the full face span (or single face) inside the 1080px crop with
+  // a minimum margin on both sides.
+  function computeCropX(f: CropFrame): number {
+    const scaledCx = Math.round(f.cx * scaleFactor);
+    const scaledFaceW = (f.faceSpanW ?? 0) * scaleFactor;
+    const margin = Math.max(60, Math.min(150, (1080 - scaledFaceW) / 4));
+    const faceLeft  = scaledCx - scaledFaceW / 2;
+    const faceRight = scaledCx + scaledFaceW / 2;
+    const xMin = Math.max(0, Math.round(faceRight + margin) - 1080);
+    const xMax = Math.min(evenScaledWidth - 1080, Math.round(faceLeft  - margin));
+    if (xMin <= xMax) {
+      return Math.round((xMin + xMax) / 2);
+    }
+    // Face too wide for margins → just center on face
+    return Math.max(0, Math.min(evenScaledWidth - 1080, scaledCx - 540));
+  }
+
+  // ── Helper: compute crop Y for a given frame ────────────────────────────
+  // Places face center at ~35% from top of the 1920px crop
+  // (eyes land in the upper-third — natural portrait framing).
+  // HEAD_ROOM = fraction of crop height above the face center.
+  // 0.35 means face center sits 35% down = 672px from top in 1920px crop.
+  const HEAD_ROOM = 0.35;
+  function computeCropY(f: CropFrame): number {
+    const scaledCy = Math.round(f.cy * scaleFactor);
+    // Desired top of crop: place face center at HEAD_ROOM × 1920
+    let cropY = Math.round(scaledCy - HEAD_ROOM * 1920);
+    // Clamp so crop never exceeds the scaled frame
+    cropY = Math.max(0, Math.min(maxScaledH - 1920, cropY));
+    return cropY;
+  }
+
+  // ── Safety net: empty useFrames ─────────────────────────────────────────
   if (useFrames.length === 0) {
-    const scaleH = 1920;
-    const sf = scaleH / srcHeight;
+    const sf = targetScaleH / srcHeight;
     const sw = Math.max(1080, Math.round(srcWidth * sf) % 2 === 0 ? Math.round(srcWidth * sf) : Math.round(srcWidth * sf) + 1);
     const avgCx = cropFrames.length > 0
       ? Math.round(cropFrames.reduce((s, f) => s + f.cx, 0) / cropFrames.length * sf)
       : Math.round(sw / 2);
+    const avgCy = cropFrames.length > 0
+      ? Math.round(cropFrames.reduce((s, f) => s + f.cy, 0) / cropFrames.length * sf)
+      : Math.round(targetScaleH * HEAD_ROOM);
     const cropX = Math.max(0, Math.min(sw - 1080, avgCx - 540));
-    return `scale=${sw}:${scaleH},crop=1080:1920:${cropX}:0`;
+    const cropY = Math.max(0, Math.min(targetScaleH - 1920, avgCy - Math.round(HEAD_ROOM * 1920)));
+    return `scale=${sw}:${targetScaleH},crop=1080:1920:${cropX}:${cropY}`;
   }
 
+  // ── Single frame ─────────────────────────────────────────────────────────
   if (useFrames.length === 1) {
-    const scaledCx = Math.round(useFrames[0].cx * scaleFactor);
-    const scaledFaceW = (useFrames[0].faceSpanW ?? 0) * scaleFactor;
-    const faceLeftScaled = scaledCx - scaledFaceW / 2;
-    const faceRightScaled = scaledCx + scaledFaceW / 2;
-    const margin = Math.min(150, (1080 - scaledFaceW) / 4);
-    const cropXMin = Math.max(0, faceRightScaled + margin - 1080);
-    const cropXMax = Math.min(evenScaledWidth - 1080, faceLeftScaled - margin);
-    const cropX = cropXMin <= cropXMax
-      ? Math.round((cropXMin + cropXMax) / 2)
-      : Math.max(0, Math.min(evenScaledWidth - 1080, scaledCx - 540));
-    return `scale=${evenScaledWidth}:${targetScaleH},crop=1080:1920:${cropX}:0`;
+    const cropX = computeCropX(useFrames[0]);
+    const cropY = computeCropY(useFrames[0]);
+    return `scale=${evenScaledWidth}:${targetScaleH},crop=1080:1920:${cropX}:${cropY}`;
   }
 
+  // ── Multi-frame: build keyframe timeline ─────────────────────────────────
   const clipStartSec = startMs / 1000;
 
   const keyframes = useFrames.map((f) => {
-    const tSec = f.timestampMs / 1000 - clipStartSec;
-    const scaledCx = Math.round(f.cx * scaleFactor);
-    // Ensure entire face stays inside the 1080px crop window.
-    // faceSpanW = face width in original pixels. After scaling, face becomes faceSpanW * scaleFactor.
-    // Add padding (1.5x face width) so face has breathing room.
-    const scaledFaceW = (f.faceSpanW ?? 0) * scaleFactor;
-    const padding = Math.max(200, scaledFaceW * 0.75); // minimum 200px padding from edge
-    const minCropX = Math.max(0, scaledCx - 540 + padding - (1080 - padding * 2) / 2);
-    const maxCropX = Math.min(evenScaledWidth - 1080, scaledCx - 540);
-    // Clamp: face center minus half crop width, but ensure face left/right edge has margin
-    const faceLeftScaled = scaledCx - scaledFaceW / 2;
-    const faceRightScaled = scaledCx + scaledFaceW / 2;
-    // Crop must satisfy: cropX <= faceLeftScaled - margin AND cropX + 1080 >= faceRightScaled + margin
-    const margin = Math.min(150, (1080 - scaledFaceW) / 4); // adaptive margin
-    const cropXMin = Math.max(0, faceRightScaled + margin - 1080); // minimum X so right edge is inside
-    const cropXMax = Math.min(evenScaledWidth - 1080, faceLeftScaled - margin); // max X so left edge is inside
-    let cropX: number;
-    if (cropXMin <= cropXMax) {
-      // Face fits with margin — center it
-      cropX = Math.round((cropXMin + cropXMax) / 2);
-    } else {
-      // Face too wide for margin — just center on face
-      cropX = Math.max(0, Math.min(evenScaledWidth - 1080, scaledCx - 540));
-    }
-    void minCropX; void maxCropX; // suppress unused
-    return { t: Math.max(0, tSec), x: cropX };
+    const tSec = Math.max(0, f.timestampMs / 1000 - clipStartSec);
+    return { t: tSec, x: computeCropX(f), y: computeCropY(f) };
   });
 
   keyframes.sort((a, b) => a.t - b.t);
 
-  // ── Ensure crop starts at t=0 with the first known face position ──
-  // Without this, frames before the first keyframe get default (center) crop
-  if (keyframes.length > 0 && keyframes[0].t > 0.05) {
-    keyframes.unshift({ t: 0, x: keyframes[0].x });
+  // Ensure crop starts at t=0
+  if (keyframes[0].t > 0.05) {
+    keyframes.unshift({ t: 0, x: keyframes[0].x, y: keyframes[0].y });
   }
 
-  // ── Limit keyframe count to prevent FFmpeg expression nesting overflow ──
-  // FFmpeg 8.x has an internal limit on expression evaluation depth.
-  // Each keyframe adds one level of if() nesting. Cap at 30 keyframes
-  // by downsampling evenly — smooth tracking is preserved since
-  // 30 keyframes over a typical 30-90s clip = ~1 per second.
+  // Cap at 30 keyframes to avoid FFmpeg expression depth overflow
   const MAX_KEYFRAMES = 30;
   if (keyframes.length > MAX_KEYFRAMES) {
     const step = (keyframes.length - 1) / (MAX_KEYFRAMES - 1);
@@ -279,40 +282,43 @@ function buildCropFilter(cropFrames: CropFrame[], startMs: number, _endMs: numbe
     keyframes.push(...sampled);
   }
 
-  let cropXExpr: string;
+  // ── Build FFmpeg piecewise-linear expression for X and Y ─────────────────
+  function buildLerpExpr(axis: 'x' | 'y'): string {
+    if (keyframes.length <= 1) return String(keyframes[0]?.[axis] ?? 0);
 
-  if (keyframes.length <= 1) {
-    cropXExpr = String(keyframes[0]?.x ?? 0);
-  } else {
-    let expr = String(keyframes[keyframes.length - 1].x);
+    let expr = String(keyframes[keyframes.length - 1][axis]);
 
     for (let i = keyframes.length - 2; i >= 0; i--) {
       const k0 = keyframes[i];
       const k1 = keyframes[i + 1];
       const dt = k1.t - k0.t;
+      const dv = k1[axis] - k0[axis];
 
       let segExpr: string;
-      if (dt < 0.001 || k0.x === k1.x) {
-        segExpr = String(k0.x);
+      if (dt < 0.001 || dv === 0) {
+        segExpr = String(k0[axis]);
       } else {
-        const dx = k1.x - k0.x;
-        if (dx === 0) {
-          segExpr = String(k0.x);
-        } else {
-          segExpr = `${k0.x}+${dx}*(min(max(t\\,${k0.t.toFixed(3)})\\,${k1.t.toFixed(3)})-${k0.t.toFixed(3)})/${dt.toFixed(3)}`;
-        }
+        segExpr = `${k0[axis]}+${dv}*(min(max(t\\,${k0.t.toFixed(3)})\\,${k1.t.toFixed(3)})-${k0.t.toFixed(3)})/${dt.toFixed(3)}`;
       }
 
       expr = `if(lt(t\\,${k1.t.toFixed(3)})\\,${segExpr}\\,${expr})`;
     }
 
-    cropXExpr = expr;
+    return expr;
   }
 
-  const maxX = evenScaledWidth - 1080;
-  const clampedExpr = `min(max(${cropXExpr}\\,0)\\,${maxX})`;
+  const cropXExpr = buildLerpExpr('x');
+  const cropYExpr = buildLerpExpr('y');
 
-  return `scale=${evenScaledWidth}:${targetScaleH},crop=1080:1920:${clampedExpr}:0`;
+  const maxX = evenScaledWidth - 1080;
+  const maxY = maxScaledH - 1920;
+
+  const clampedX = `min(max(${cropXExpr}\\,0)\\,${maxX})`;
+  const clampedY = maxY > 0
+    ? `min(max(${cropYExpr}\\,0)\\,${maxY})`
+    : '0'; // source exactly 1920h — no vertical movement possible
+
+  return `scale=${evenScaledWidth}:${targetScaleH},crop=1080:1920:${clampedX}:${clampedY}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1361,6 +1367,19 @@ export class Processor {
       try { fs.unlinkSync(assNearOutput); } catch { /* ignore */ }
     }
 
+    // ── Step 3.5: Audio treatment — mute or replace the original audio ───
+    // Removing/replacing copyrighted source audio is the single most
+    // effective LEGITIMATE way to avoid Content ID audio claims.
+    if (opts.audioMode && opts.audioMode !== 'keep') {
+      try {
+        await this._applyAudioTreatment(
+          clipId, outputPath, opts.audioMode, opts.replacementAudioPath, opts.musicVolume,
+        );
+      } catch (err) {
+        log.warn({ clipId, err }, 'Audio treatment failed, keeping original audio');
+      }
+    }
+
     // ── Step 4: Prepend thumbnail image as 1-second still frame ──────────
     if (opts.thumbnailPath && fs.existsSync(opts.thumbnailPath)) {
       log.info({ clipId, thumbnailPath: opts.thumbnailPath }, 'Prepending thumbnail as 1s intro');
@@ -1419,6 +1438,68 @@ export class Processor {
     ]);
 
     log.info({ sourceFile, timestampMs, outputPath }, 'Thumbnail generated');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private — audio treatment (mute / replace original audio)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Mute or replace the original audio track of a finished clip.
+   *
+   * - 'mute'    : strips audio entirely (-an).
+   * - 'replace' : swaps the original audio with a looped music track at the
+   *               given volume. Falls back to keeping the original audio if no
+   *               valid music file is provided.
+   *
+   * Re-muxes in place (video stream is copied, so it is fast and lossless for
+   * video). Intended for legitimate use: removing copyrighted source audio you
+   * do not have the right to redistribute, or adding your own licensed music.
+   */
+  private async _applyAudioTreatment(
+    clipId: string,
+    outputPath: string,
+    mode: 'keep' | 'mute' | 'replace',
+    replacementAudioPath?: string,
+    musicVolume = 0.8,
+  ): Promise<void> {
+    if (mode === 'keep') return;
+
+    const tmpOut = path.join(os.tmpdir(), `audio-${clipId}-${Date.now()}.mp4`);
+
+    if (mode === 'mute') {
+      log.info({ clipId }, 'Stripping original audio (mute)');
+      await runProcess('ffmpeg', [
+        '-y', '-i', outputPath,
+        '-c:v', 'copy', '-an',
+        '-movflags', '+faststart',
+        tmpOut,
+      ]);
+    } else {
+      // mode === 'replace'
+      if (!replacementAudioPath || !fs.existsSync(replacementAudioPath)) {
+        log.warn({ clipId, replacementAudioPath }, 'No valid replacement audio — keeping original audio');
+        return;
+      }
+      const vol = Math.max(0, Math.min(1, Number.isFinite(musicVolume) ? musicVolume : 0.8));
+      log.info({ clipId, replacementAudioPath, vol }, 'Replacing original audio with music track');
+      await runProcess('ffmpeg', [
+        '-y',
+        '-i', outputPath,
+        '-stream_loop', '-1', '-i', replacementAudioPath,
+        '-map', '0:v:0', '-map', '1:a:0',
+        '-c:v', 'copy',
+        '-c:a', 'aac', '-b:a', '320k',
+        '-af', `volume=${vol.toFixed(3)}`,
+        '-shortest',
+        '-movflags', '+faststart',
+        tmpOut,
+      ]);
+    }
+
+    // Replace the original output in place
+    fs.copyFileSync(tmpOut, outputPath);
+    try { fs.unlinkSync(tmpOut); } catch { /* ignore */ }
   }
 
   // ---------------------------------------------------------------------------

@@ -296,6 +296,17 @@ export interface AppSettings {
   googleSttServiceAccountPath: string;
   /** Gemini API key for hook detection (Vertex AI Express or AI Studio key) */
   geminiApiKey: string;
+  // --- Copyright safety ---------------------------------------------------
+  /** Auto-append source attribution to YouTube upload descriptions. */
+  autoAttribution: boolean;
+  /** Attribution template. {title} and {url} are replaced with the source video's. */
+  attributionTemplate: string;
+  /** Default audio treatment for generated clips. */
+  defaultAudioMode: 'keep' | 'mute' | 'replace';
+  /** Background music file used when defaultAudioMode === 'replace'. */
+  backgroundMusicPath: string;
+  /** Replacement background-music volume (0.0-1.0). */
+  musicVolume: number;
 }
 
 // ---------------------------------------------------------------------------

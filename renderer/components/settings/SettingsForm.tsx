@@ -346,6 +346,112 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
         </div>
       </div>
 
+      {/* ── Copyright & Audio ── */}
+      <div>
+        <SectionHeader title="Copyright & Audio" />
+        <div className="flex flex-col gap-4">
+          <label htmlFor="setting-auto-attribution" className="flex items-start gap-3 cursor-pointer">
+            <input
+              id="setting-auto-attribution"
+              type="checkbox"
+              checked={form.autoAttribution ?? true}
+              onChange={(e) => set('autoAttribution', e.target.checked)}
+              className="mt-0.5 h-4 w-4 shrink-0 accent-accent"
+            />
+            <span className="text-sm text-text-primary">
+              Auto-add source attribution to upload description
+              <span className="block text-[10px] text-text-secondary">
+                Appends a credit to the original video (downloaded sources only). Does not prevent Content ID claims.
+              </span>
+            </span>
+          </label>
+
+          <Field label="Attribution Template" id="setting-attribution-template">
+            <textarea
+              id="setting-attribution-template"
+              value={form.attributionTemplate ?? ''}
+              onChange={(e) => set('attributionTemplate', e.target.value)}
+              rows={3}
+              placeholder="Source: {title} {url}"
+              className={cn(
+                'rounded-md border border-border bg-background px-3 py-2 text-sm text-text-primary resize-none',
+                'placeholder:text-text-secondary/50',
+                'focus:outline-none focus:ring-2 focus:ring-accent transition-micro'
+              )}
+            />
+            <p className="text-[10px] text-text-secondary mt-1">
+              Use <code>{'{title}'}</code> and <code>{'{url}'}</code> placeholders for the source video.
+            </p>
+          </Field>
+
+          <Field label="Default Audio for Clips" id="setting-audio-mode">
+            <SegmentedControl
+              id="setting-audio-mode"
+              aria-label="Default audio mode"
+              options={[
+                { value: 'keep', label: 'Keep original' },
+                { value: 'mute', label: 'Mute' },
+                { value: 'replace', label: 'Replace music' },
+              ]}
+              value={form.defaultAudioMode ?? 'keep'}
+              onChange={(v) => set('defaultAudioMode', v as AppSettings['defaultAudioMode'])}
+            />
+            <p className="text-[10px] text-text-secondary mt-1">
+              Removing/replacing copyrighted source audio is the most effective legitimate way to avoid audio Content ID claims.
+            </p>
+          </Field>
+
+          {form.defaultAudioMode === 'replace' && (
+            <>
+              <Field label="Background Music File" id="setting-music-path">
+                <div className="flex gap-2">
+                  <input
+                    id="setting-music-path"
+                    type="text"
+                    readOnly
+                    value={form.backgroundMusicPath ?? ''}
+                    placeholder="No music selected"
+                    className={cn(
+                      'flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm text-text-primary',
+                      'placeholder:text-text-secondary/50 cursor-default',
+                      'focus:outline-none focus:ring-2 focus:ring-accent'
+                    )}
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const filePath = await ipc.dialog.openFile();
+                        if (filePath) set('backgroundMusicPath', filePath);
+                      } catch { /* cancelled */ }
+                    }}
+                    className="shrink-0 rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-medium hover:bg-surface-hover transition-micro"
+                  >
+                    Browse
+                  </button>
+                </div>
+                <p className="text-[10px] text-text-secondary mt-1">
+                  Use only music you have the right to use (royalty-free / licensed / your own).
+                </p>
+              </Field>
+
+              <Field label={`Music Volume (${Math.round((form.musicVolume ?? 0.8) * 100)}%)`} id="setting-music-volume">
+                <input
+                  id="setting-music-volume"
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={form.musicVolume ?? 0.8}
+                  onChange={(e) => set('musicVolume', parseFloat(e.target.value))}
+                  className="w-full accent-accent"
+                />
+              </Field>
+            </>
+          )}
+        </div>
+      </div>
+
       {/* ── YouTube Account ── */}
       <div>
         <SectionHeader title="YouTube Account" />

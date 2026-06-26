@@ -76,6 +76,7 @@ function UploadDialog({ hook, clip, onConfirm, onCancel, uploading, error }: Upl
   const [tags, setTags] = useState('');
   const [privacy, setPrivacy] = useState<PrivacySetting>('private');
   const [aiGenerating, setAiGenerating] = useState(false);
+  const [rightsConfirmed, setRightsConfirmed] = useState(false);
 
   const handleAiGenerate = async () => {
     setAiGenerating(true);
@@ -237,6 +238,26 @@ function UploadDialog({ hook, clip, onConfirm, onCancel, uploading, error }: Upl
           </p>
         )}
 
+        {/* Copyright confirmation */}
+        <label
+          htmlFor="upload-rights-confirm"
+          className={cn(
+            'flex items-start gap-3 rounded-md border px-3 py-2.5 cursor-pointer transition-micro',
+            rightsConfirmed ? 'border-success/60 bg-success/5' : 'border-border bg-background'
+          )}
+        >
+          <input
+            id="upload-rights-confirm"
+            type="checkbox"
+            checked={rightsConfirmed}
+            onChange={(e) => setRightsConfirmed(e.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0 accent-accent"
+          />
+          <span className="text-[11px] text-text-secondary leading-relaxed">
+            Saya memiliki hak atau izin atas materi ini, dan bertanggung jawab penuh atas kepatuhan hak cipta saat mengunggah ke YouTube.
+          </span>
+        </label>
+
         {/* Actions */}
         <div className="flex justify-end gap-2">
           <button
@@ -255,7 +276,7 @@ function UploadDialog({ hook, clip, onConfirm, onCancel, uploading, error }: Upl
           <button
             type="button"
             onClick={() => onConfirm(title, description, tags.split(',').map(t => t.trim()).filter(Boolean), privacy)}
-            disabled={uploading || !title.trim()}
+            disabled={uploading || !title.trim() || !rightsConfirmed}
             className={cn(
               'flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-xs font-semibold text-accent-foreground',
               'hover:bg-accent-hover transition-micro',

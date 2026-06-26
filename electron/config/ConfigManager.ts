@@ -39,6 +39,11 @@ function buildDefaults(): AppSettings {
     deepgramApiKey: '',
     googleSttServiceAccountPath: '',
     geminiApiKey: '',
+    autoAttribution: true,
+    attributionTemplate: 'Sumber / Source: {title}\n{url}\nAll rights belong to the original creator.',
+    defaultAudioMode: 'keep',
+    backgroundMusicPath: '',
+    musicVolume: 0.8,
   };
 }
 
@@ -86,6 +91,14 @@ export class ConfigManager {
         deepgramApiKey: { type: 'string' },
         googleSttServiceAccountPath: { type: 'string' },
         geminiApiKey: { type: 'string' },
+        autoAttribution: { type: 'boolean' },
+        attributionTemplate: { type: 'string' },
+        defaultAudioMode: {
+          type: 'string',
+          enum: ['keep', 'mute', 'replace'],
+        },
+        backgroundMusicPath: { type: 'string' },
+        musicVolume: { type: 'number' },
       },
     });
   }
