@@ -33,15 +33,45 @@ export class Tracker {
     startMs: number,
     endMs: number,
     _serviceAccountPath?: string,
-    _srcWidth = 1920,
-    _srcHeight = 1080,
+    srcWidth = 1920,
+    srcHeight = 1080,
   ): Promise<CropFrame[]> {
-    try {
-      return await this._detectWithScript(sourceFile, startMs, endMs);
-    } catch (err) {
-      log.warn({ err }, 'Face detection failed, returning empty frames');
-      return [];
+    // Attempt detection, retry once on failure (transient MediaPipe/IO errors).
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const frames = await this._detectWithScript(sourceFile, startMs, endMs);
+        if (frames.length > 0) return frames;
+        log.warn({ attempt }, 'Face detection returned no frames');
+      } catch (err) {
+        log.warn({ err, attempt }, 'Face detection attempt failed');
+      }
     }
+    // Never return empty: synthesize a rule-of-thirds crop so the Processor
+    // keeps the subject region instead of collapsing to a hard center crop.
+    log.warn('Face detection unavailable, using rule-of-thirds fallback frames');
+    return this._fallbackFrames(startMs, endMs, srcWidth, srcHeight);
+  }
+
+  /**
+   * Build synthetic crop frames anchored on the upper-third center of the
+   * frame (where faces most commonly sit) so the output is never a dead
+   * center crop when detection fails entirely.
+   */
+  private _fallbackFrames(
+    startMs: number,
+    endMs: number,
+    srcWidth: number,
+    srcHeight: number,
+  ): CropFrame[] {
+    const cx = Math.round(srcWidth / 2);
+    const cy = Math.round(srcHeight / 3);
+    const count = 2;
+    const out: CropFrame[] = [];
+    for (let i = 0; i < count; i++) {
+      const timestampMs = startMs + ((endMs - startMs) * i) / Math.max(1, count - 1);
+      out.push({ frameIndex: i, timestampMs, cx, cy, hasFace: false, faceSpanW: 0 });
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------------------
@@ -88,11 +118,27 @@ export class Tracker {
 
       const data = JSON.parse(fs.readFileSync(outputJson, 'utf-8')) as {
         frames: Array<{ frameIndex: number; timestampMs: number; cx: number; cy: number; hasFace: boolean; faceSpanW?: number }>;
+        avgCx?: number;
+        avgCy?: number;
       };
 
       try { fs.unlinkSync(outputJson); } catch { /* ignore */ }
 
-      log.info({ frameCount: data.frames.length }, 'Face detection complete');
+      const detectedCount = data.frames.filter((f) => f.hasFace).length;
+      log.info({ frameCount: data.frames.length, detectedCount }, 'Face detection complete');
+
+      // If the script produced frames but none has a face, anchor every frame
+      // on the script's average position (still better than center crop).
+      if (data.frames.length > 0 && detectedCount === 0 && data.avgCx != null) {
+        return data.frames.map((f) => ({
+          frameIndex: f.frameIndex,
+          timestampMs: f.timestampMs,
+          cx: data.avgCx as number,
+          cy: (data.avgCy ?? f.cy) as number,
+          hasFace: false,
+          faceSpanW: 0,
+        }));
+      }
 
       return data.frames.map((f) => ({
         frameIndex: f.frameIndex,

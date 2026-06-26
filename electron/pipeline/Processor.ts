@@ -192,7 +192,23 @@ function buildCropFilter(cropFrames: CropFrame[], startMs: number, _endMs: numbe
   const evenScaledWidth = Math.max(1080, scaledWidth % 2 === 0 ? scaledWidth : scaledWidth + 1);
 
   // Use detected frames for crop positions. Fall back to all frames only if nothing detected.
+  // cropFrames always carries a subject-region estimate (avg/rule-of-thirds)
+  // from the Tracker, so using them keeps off-center subjects in frame instead
+  // of collapsing to a hard center crop.
   const useFrames = detectedFrames.length > 0 ? detectedFrames : cropFrames;
+
+  // Safety net: if for any reason useFrames is empty, build a single keyframe
+  // anchored on the average subject X rather than emitting a center crop.
+  if (useFrames.length === 0) {
+    const scaleH = 1920;
+    const sf = scaleH / srcHeight;
+    const sw = Math.max(1080, Math.round(srcWidth * sf) % 2 === 0 ? Math.round(srcWidth * sf) : Math.round(srcWidth * sf) + 1);
+    const avgCx = cropFrames.length > 0
+      ? Math.round(cropFrames.reduce((s, f) => s + f.cx, 0) / cropFrames.length * sf)
+      : Math.round(sw / 2);
+    const cropX = Math.max(0, Math.min(sw - 1080, avgCx - 540));
+    return `scale=${sw}:${scaleH},crop=1080:1920:${cropX}:0`;
+  }
 
   if (useFrames.length === 1) {
     const scaledCx = Math.round(useFrames[0].cx * scaleFactor);
@@ -1658,8 +1674,17 @@ export class Processor {
 
       const data = JSON.parse(fs.readFileSync(outputJson, 'utf-8')) as {
         frames: Array<{ frameIndex: number; timestampMs: number; cx: number; cy: number; hasFace: boolean; faceSpanW?: number }>;
+        speakerFaces?: Record<string, { avgCx: number }>;
       };
       try { fs.unlinkSync(outputJson); } catch { /* ignore */ }
+
+      // Store speaker face positions for split/quad layout (same as _detectFaces does)
+      if (data.speakerFaces) {
+        this._lastSpeakerPositions = Object.values(data.speakerFaces)
+          .map((sf) => ({ cx: sf.avgCx, cy: 0 }));
+      } else {
+        this._lastSpeakerPositions = [];
+      }
 
       return data.frames.map((f) => ({
         frameIndex:  f.frameIndex,

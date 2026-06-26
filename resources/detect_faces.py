@@ -130,6 +130,30 @@ def interpolate_missing(positions, has_face_list):
 # Detection helpers
 # ---------------------------------------------------------------------------
 
+def _dedupe_boxes(boxes, iou_thresh=0.5):
+    """Merge overlapping detections (from full+short range) into one set."""
+    if not boxes:
+        return []
+
+    def iou(a, b):
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        ix1 = max(ax, bx); iy1 = max(ay, by)
+        ix2 = min(ax + aw, bx + bw); iy2 = min(ay + ah, by + bh)
+        iw = max(0, ix2 - ix1); ih = max(0, iy2 - iy1)
+        inter = iw * ih
+        union = aw * ah + bw * bh - inter
+        return inter / union if union > 0 else 0.0
+
+    # Keep larger boxes first, drop later boxes that overlap heavily.
+    boxes_sorted = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)
+    kept = []
+    for box in boxes_sorted:
+        if all(iou(box, k) < iou_thresh for k in kept):
+            kept.append(box)
+    return kept
+
+
 def pick_group_center(faces):
     """Union bounding box center of all faces. Returns (cx, cy, span_w)."""
     if not faces:
@@ -192,7 +216,10 @@ def detect_subjects(frame_small, face_cascade, body_cascade, scale, width, heigh
             if isinstance(mp_detector, tuple):
                 det_full, det_short = mp_detector
 
-                # Run full-range first (catches far faces)
+                # Run BOTH detectors and UNION the results. Previously the code
+                # used either full OR short range, which dropped close-up faces
+                # when full-range fired and vice-versa. Unioning + de-duping
+                # maximizes recall so faces are not missed.
                 faces_full = []
                 if det_full:
                     r = det_full.detect(mp_image)
@@ -200,17 +227,14 @@ def detect_subjects(frame_small, face_cascade, body_cascade, scale, width, heigh
                                    d.bounding_box.width, d.bounding_box.height)
                                   for d in (r.detections or [])]
 
-                # If largest face > 120px wide → close-up → use short-range for precision
-                max_w_scaled = max((bw / scale for _, _, bw, _ in faces_full), default=0)
-                if max_w_scaled > 120 and det_short:
+                faces_short = []
+                if det_short:
                     r2 = det_short.detect(mp_image)
                     faces_short = [(d.bounding_box.origin_x, d.bounding_box.origin_y,
                                     d.bounding_box.width, d.bounding_box.height)
                                    for d in (r2.detections or [])]
-                    # Use short-range if it found faces, else keep full-range
-                    all_faces = faces_short if faces_short else faces_full
-                else:
-                    all_faces = faces_full
+
+                all_faces = _dedupe_boxes(faces_full + faces_short)
             else:
                 r = mp_detector.detect(mp_image)
                 all_faces = [(d.bounding_box.origin_x, d.bounding_box.origin_y,
@@ -532,6 +556,18 @@ def main():
                 )
             )
 
+        def _make_detector(model_path):  # noqa: F811 (override with lower threshold)
+            return mp_vision.FaceDetector.create_from_options(
+                mp_vision.FaceDetectorOptions(
+                    base_options=mp_python.BaseOptions(model_asset_path=model_path),
+                    running_mode=mp_vision.RunningMode.IMAGE,
+                    # Lower threshold (0.25) to catch tilted/profile/partially
+                    # occluded faces that 0.35 missed. False positives are
+                    # filtered later by area + continuity scoring.
+                    min_detection_confidence=0.25,
+                )
+            )
+
         if os.path.exists(model_full):
             mp_detector_full = _make_detector(model_full)
             print('MediaPipe full-range detector initialized', file=sys.stderr)
@@ -569,7 +605,9 @@ def main():
             all_detections_per_frame.append([])
             continue
 
-        scale = min(1.0, 480 / width)
+        # Use a higher working resolution (720px) so small/distant faces are
+        # not lost. 480px was too aggressive and dropped faces < ~25px wide.
+        scale = min(1.0, 720 / width)
         small = cv2.resize(frame, (int(width * scale), int(height * scale)))
 
         detections, det_type = detect_subjects(
@@ -596,26 +634,29 @@ def main():
         all_detections_per_frame.append(frame_faces)
 
         if detections:
-            if len(detections) >= 2:
-                result = pick_group_center(detections)
-                if result:
-                    cx, cy, span_w = result
-                    prev_cx = cx
-                    raw_positions.append((cx, cy))
-                    has_face_list.append(True)
+            # For normal (single-panel) auto tracking, always follow the BEST
+            # single face regardless of how many faces are in the frame.
+            # pick_group_center() was used previously but it produces a midpoint
+            # between two far-apart faces which sits in "dead space" between
+            # people — the 9:16 crop then shows only half a face on each side.
+            # Instead: score each face by area × vertical_bonus × continuity and
+            # track the winner. The span_w is still recorded so buildCropFilter()
+            # can detect multi-face frames and zoom out if needed.
+            result_single = pick_best_detection(detections, width, height, prev_cx)
+            if result_single:
+                cx, cy = result_single
+                prev_cx = cx
+                raw_positions.append((cx, cy))
+                has_face_list.append(True)
+                # Record span only when 2+ faces detected, so Processor can
+                # decide whether to widen the crop to fit both people.
+                if len(detections) >= 2:
+                    _, _, span_w = pick_group_center(detections)
                     face_span_list.append(span_w)
-                    detection_types.append(det_type)
-                    continue
-            else:
-                result_single = pick_best_detection(detections, width, height, prev_cx)
-                if result_single:
-                    cx, cy = result_single
-                    prev_cx = cx
-                    raw_positions.append((cx, cy))
-                    has_face_list.append(True)
+                else:
                     face_span_list.append(0)
-                    detection_types.append(det_type)
-                    continue
+                detection_types.append(det_type)
+                continue
 
         # No detection
         cx = prev_cx if prev_cx is not None else width // 2
@@ -625,6 +666,19 @@ def main():
         detection_types.append('none')
 
     cap.release()
+
+    # ── Global-average fallback ───────────────────────────────────────────
+    # If at least one face was found anywhere in the clip, seed every no-face
+    # frame with the AVERAGE detected face position instead of frame center.
+    # This guarantees the crop follows the subject region even when detection
+    # drops out, eliminating the "random center crop" failure mode.
+    detected_idx = [i for i, h in enumerate(has_face_list) if h]
+    if detected_idx:
+        avg_face_cx = int(sum(raw_positions[i][0] for i in detected_idx) / len(detected_idx))
+        avg_face_cy = int(sum(raw_positions[i][1] for i in detected_idx) / len(detected_idx))
+        for i in range(len(raw_positions)):
+            if not has_face_list[i]:
+                raw_positions[i] = (avg_face_cx, avg_face_cy)
 
     # Interpolate missing frames, then smooth
     raw_positions = interpolate_missing(raw_positions, has_face_list)

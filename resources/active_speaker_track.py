@@ -169,15 +169,14 @@ def detect_faces_at_frame(frame_small, face_cascade, body_cascade, scale, width,
                     faces_full = [(d.bounding_box.origin_x, d.bounding_box.origin_y,
                                    d.bounding_box.width, d.bounding_box.height)
                                   for d in (r.detections or [])]
-                max_w_scaled = max((bw / scale for _, _, bw, _ in faces_full), default=0)
-                if max_w_scaled > 120 and det_short:
+                # Run short-range too and UNION results (better recall)
+                faces_short = []
+                if det_short:
                     r2 = det_short.detect(mp_image)
                     faces_short = [(d.bounding_box.origin_x, d.bounding_box.origin_y,
                                     d.bounding_box.width, d.bounding_box.height)
                                    for d in (r2.detections or [])]
-                    all_faces = faces_short if faces_short else faces_full
-                else:
-                    all_faces = faces_full
+                all_faces = faces_full + faces_short
             else:
                 r = mp_detector.detect(mp_image)
                 all_faces = [(d.bounding_box.origin_x, d.bounding_box.origin_y,
@@ -217,8 +216,6 @@ def detect_faces_at_frame(frame_small, face_cascade, body_cascade, scale, width,
         if len(bodies) > 0:
             return [(int(x/scale), int(y/scale), int(w/scale), int(h/scale))
                     for (x, y, w, h) in bodies], 'body'
-
-    return [], 'none'
 
     return [], 'none'
 
@@ -410,7 +407,7 @@ def main():
                 mp_vision.FaceDetectorOptions(
                     base_options=mp_python.BaseOptions(model_asset_path=path),
                     running_mode=mp_vision.RunningMode.IMAGE,
-                    min_detection_confidence=0.35,
+                    min_detection_confidence=0.25,
                 )
             )
 
@@ -516,9 +513,24 @@ def main():
             face_span_list.append(span_w)
 
         elif faces:
-            # Fallback: track largest face
-            largest = max(faces, key=lambda f: f[2] * f[3])
-            fx, fy, fw, fh = largest
+            # Fallback: if we know where each speaker is, pick the face closest
+            # to the active speaker's expected position (or any known speaker).
+            # This avoids tracking the wrong person when diarization loses sync.
+            best_face = None
+            if speaker_face_map:
+                # Pick the face closest to any known speaker position
+                best_dist = float('inf')
+                for (fx, fy, fw, fh) in faces:
+                    face_cx = fx + fw // 2
+                    for spk_cx in speaker_face_map.values():
+                        dist = abs(face_cx - spk_cx)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_face = (fx, fy, fw, fh)
+            if best_face is None:
+                # Last resort: largest face (most prominent person)
+                best_face = max(faces, key=lambda f: f[2] * f[3])
+            fx, fy, fw, fh = best_face
             raw_positions.append((fx + fw//2, fy + fh//2))
             has_face_list.append(True)
             face_span_list.append(0)
@@ -530,6 +542,15 @@ def main():
     cap.release()
 
     # ── Smooth ────────────────────────────────────────────────────────────
+    # ── Global-average fallback for no-face frames (avoid center crop) ─────
+    detected_idx = [i for i, h in enumerate(has_face_list) if h]
+    if detected_idx:
+        avg_face_cx = int(sum(raw_positions[i][0] for i in detected_idx) / len(detected_idx))
+        avg_face_cy = int(sum(raw_positions[i][1] for i in detected_idx) / len(detected_idx))
+        for i in range(len(raw_positions)):
+            if not has_face_list[i]:
+                raw_positions[i] = (avg_face_cx, avg_face_cy)
+
     raw_positions = interpolate_missing(raw_positions, has_face_list)
     smoothed = smooth_positions(raw_positions, has_face_list)
 
