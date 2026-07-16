@@ -868,9 +868,9 @@ def main():
         if remove_vocals:
             # Separate vocals
             bg_audio_track = separate_vocals(args.file, tmp_dir)
-            # Constant -12dB volume for background instrumental
-            duck_filter = "volume=0.2512"
-            print("Background audio is separated instrumental at constant -12dB", file=sys.stderr)
+            # Constant -6dB volume for background instrumental
+            duck_filter = "volume=0.5012"
+            print("Background audio is separated instrumental at constant -6dB", file=sys.stderr)
         else:
             duck_filter = build_duck_filter(tts_segs, args.duck_db)
             print(f'Duck filter: {duck_filter[:80]}...', file=sys.stderr)
