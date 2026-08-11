@@ -5,7 +5,7 @@
  * rendering options, then produces a 9:16 vertical short-form clip.
  */
 
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, execFile } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -13,7 +13,7 @@ import { BrowserWindow } from 'electron';
 import { CHANNELS } from '../ipc/channels';
 import { createLogger } from '../utils/logger';
 import { Tracker } from './Tracker';
-import type { TranscriptWord, SubtitleStyle, SubtitlePosition, CropFrame, CaptionStyle, LogoOverlay, LayoutPreset, SplitLayout, GameRatio, GamePosition } from '../../shared/types';
+import type { TranscriptWord, SubtitleStyle, SubtitlePosition, CropFrame, CaptionStyle, CaptionPresetId, LogoOverlay, LayoutPreset, SplitLayout, GameRatio, GamePosition, LetterboxBackground, TitleOverlay, CommentatorTransitionEffect, AvatarConfig } from '../../shared/types';
 import { CAPTION_PRESETS } from '../../shared/types';
 
 const log = createLogger('Processor');
@@ -42,7 +42,7 @@ export interface ProcessOptions {
   subjectBbox?:     { x: number; y: number; w: number; h: number };
   /** Manual mode: timestamp (ms) where subjectBbox was selected */
   subjectSeedMs?:   number;
-  /** Layout preset: 'normal' (default), 'split' (multi-speaker), 'game' (gameplay+facecam) */
+  /** Layout preset: 'normal' (default), 'split' (multi-speaker), 'game' (gameplay+facecam), 'letterbox' (fit+bg) */
   layoutPreset?:    LayoutPreset;
   /** Split layout direction (only used when layoutPreset === 'split') */
   splitLayout?:     SplitLayout;
@@ -50,6 +50,10 @@ export interface ProcessOptions {
   gameRatio?:       GameRatio;
   /** Game layout position — gameplay overlay at top or bottom (only used when layoutPreset === 'game') */
   gamePosition?:    GamePosition;
+  /** Letterbox background options (only used when layoutPreset === 'letterbox') */
+  letterboxBg?:     LetterboxBackground;
+  /** Static title overlay — user-typed text burned in for full clip duration */
+  titleOverlay?:    TitleOverlay;
   /** Custom thumbnail image path — prepended as 1-second still frame at start of clip */
   thumbnailPath?:   string;
   /** Audio treatment: 'keep' (default), 'mute' (strip audio), 'replace' (swap with music). */
@@ -84,6 +88,72 @@ function runProcess(command: string, args: string[]): Promise<void> {
     proc.on('error', (e) => reject(new Error(`${command} spawn error: ${e.message}`)));
     proc.on('close', (code) => {
       if (code !== 0) reject(new Error(`${command} exited ${code}: ${stderr.slice(-400)}`));
+      else resolve();
+    });
+  });
+}
+
+/** Emit commentator:progress IPC to all BrowserWindows */
+function emitCommentaryProgress(percent: number, message: string) {
+  try {
+    const { BrowserWindow } = require('electron');
+    const wins = BrowserWindow.getAllWindows();
+    for (const win of wins) {
+      if (!win.isDestroyed()) {
+        win.webContents.send('commentator:progress', { percent, stage: 'render', message });
+      }
+    }
+  } catch {}
+}
+
+/**
+ * Run FFmpeg with real-time progress reporting via commentator:progress IPC.
+ * Parses time=HH:MM:SS.cs from stderr and maps it to percent range [startPct, endPct].
+ */
+function runProcessWithRealtimeProgress(
+  args: string[],
+  totalDurationSec: number,
+  startPct: number,
+  endPct: number,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    let lastEmittedPct = startPct;
+
+    proc.stderr.on('data', (c: Buffer) => {
+      const chunk = c.toString();
+      stderr += chunk;
+      const match = chunk.match(/time=(\d+):(\d+):(\d+\.\d+)/);
+      if (match && totalDurationSec > 0) {
+        const elapsedSec =
+          parseInt(match[1], 10) * 3600 +
+          parseInt(match[2], 10) * 60 +
+          parseFloat(match[3]);
+        const progress = Math.min(1, elapsedSec / totalDurationSec);
+        const pct = Math.round(startPct + progress * (endPct - startPct));
+        if (pct > lastEmittedPct) {
+          lastEmittedPct = pct;
+          try {
+            const { BrowserWindow } = require('electron');
+            const wins = BrowserWindow.getAllWindows();
+            for (const win of wins) {
+              if (!win.isDestroyed()) {
+                win.webContents.send('commentator:progress', {
+                  percent: pct,
+                  stage: 'render',
+                  message: `Rendering final video... ${pct}%`,
+                });
+              }
+            }
+          } catch {}
+        }
+      }
+    });
+
+    proc.on('error', (e) => reject(new Error(`ffmpeg spawn error: ${e.message}`)));
+    proc.on('close', (code) => {
+      if (code !== 0) reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-400)}`));
       else resolve();
     });
   });
@@ -127,8 +197,12 @@ function runFfmpegWithProgress(
         reject(new Error('ffmpeg cancelled'));
         return;
       }
-      if (code !== 0) reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-800)}`));
-      else resolve();
+      if (code !== 0) {
+        const cmd = ['ffmpeg', '-y', ...args].join(' ');
+        reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-1200)}\n\nCMD: ${cmd}`));
+      } else {
+        resolve();
+      }
     });
   });
 
@@ -155,38 +229,60 @@ function runFfmpegWithProgress(
  * KEY FIX: crop Y is now dynamic, derived from cy with head-room offset.
  * Previously crop Y was always 0 (top of frame), causing wajah terpotong.
  */
-function buildCropFilter(cropFrames: CropFrame[], startMs: number, _endMs: number, srcWidth = 1920, srcHeight = 1080): string {
-  // Guard: vertical/square source
-  const srcAspect = srcWidth / srcHeight;
-  if (srcAspect <= 1.0) {
-    return 'scale=1080:-2,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black';
+function buildCropFilter(
+  cropFrames: CropFrame[],
+  startMs: number,
+  _endMs: number,
+  srcWidth = 1920,
+  srcHeight = 1080,
+  targetAR: '9:16' | '1:1' | '4:3' = '9:16',
+): string {
+  let targetCropW = 1080;
+  let targetCropH = 1920;
+  if (targetAR === '1:1') {
+    targetCropW = 1080;
+    targetCropH = 1080;
+  } else if (targetAR === '4:3') {
+    targetCropW = 1080;
+    targetCropH = 810;
   }
 
-  // Guard: source too narrow after scaling to 1920h
-  const scaledWidthCheck = Math.round(srcWidth * (1920 / srcHeight));
-  if (scaledWidthCheck < 1080) {
-    return 'scale=1080:-2,crop=1080:min(ih\\,1920):0:(ih-min(ih\\,1920))/2,pad=1080:1920:0:(oh-ih)/2:black';
+  // Guard: vertical/square source or narrower than target aspect ratio
+  const srcAspect = srcWidth / srcHeight;
+  const targetAspect = targetCropW / targetCropH;
+  if (srcAspect <= targetAspect) {
+    return `scale=${targetCropW}:${targetCropH}:force_original_aspect_ratio=decrease:flags=lanczos,` +
+           `pad=${targetCropW}:${targetCropH}:(ow-iw)/2:(oh-ih)/2:black,` +
+           `setsar=1`;
+  }
+
+  // Guard: source too narrow after scaling to targetCropH — treat same as vertical
+  const scaledWidthCheck = Math.round(srcWidth * (targetCropH / srcHeight));
+  if (scaledWidthCheck < targetCropW) {
+    return `scale=${targetCropW}:${targetCropH}:force_original_aspect_ratio=decrease:flags=lanczos,` +
+           `pad=${targetCropW}:${targetCropH}:(ow-iw)/2:(oh-ih)/2:black,` +
+           `setsar=1`;
   }
 
   if (cropFrames.length === 0) {
-    return 'scale=-2:1920,crop=1080:1920:(iw-1080)/2:0';
+    return `scale=-2:${targetCropH},crop=${targetCropW}:${targetCropH}:(iw-${targetCropW})/2:0`;
   }
 
   // ── Scale factor: fit source into scaled canvas ──────────────────────────
   // For multi-face: we may need to zoom out horizontally so both faces fit.
-  // For single face: always scale to exactly 1920h for maximum quality.
+  // For single face: scale to targetCropH for maximum quality.
   const detectedFrames = cropFrames.filter((f) => f.hasFace);
   const multiFrames = detectedFrames.filter((f) => (f.faceSpanW ?? 0) > 0);
-  let targetScaleH = 1920;
+  let targetScaleH = targetCropH;
 
   if (multiFrames.length > 0) {
     const spans = multiFrames.map((f) => f.faceSpanW ?? 0).sort((a, b) => a - b);
     const medianSpan = spans[Math.floor(spans.length / 2)];
-    // 1.4× headroom so faces aren't edge-to-edge in the 1080px crop
+    // 1.4× headroom so faces aren't edge-to-edge in targetCropW
     const requiredCropW = Math.round(medianSpan * 1.4);
-    if (requiredCropW > 1080) {
-      const ratio = 1080 / requiredCropW;
-      targetScaleH = Math.max(1920, Math.round(ratio * 1920));
+    if (requiredCropW > targetCropW) {
+      const ratio = targetCropW / requiredCropW;
+      targetScaleH = Math.max(targetCropH, Math.round(ratio * targetCropH));
     }
   }
 
@@ -195,64 +291,60 @@ function buildCropFilter(cropFrames: CropFrame[], startMs: number, _endMs: numbe
 
   const scaleFactor = targetScaleH / srcHeight;
   const scaledWidth = Math.round(srcWidth * scaleFactor);
-  const evenScaledWidth = Math.max(1080, scaledWidth % 2 === 0 ? scaledWidth : scaledWidth + 1);
+  const evenScaledWidth = Math.max(targetCropW, scaledWidth % 2 === 0 ? scaledWidth : scaledWidth + 1);
   const maxScaledH = targetScaleH; // after scale, frame is exactly this tall
 
   const useFrames = detectedFrames.length > 0 ? detectedFrames : cropFrames;
 
   // ── Helper: compute crop X for a given frame ────────────────────────────
-  // Keeps the full face span (or single face) inside the 1080px crop with
+  // Keeps the full face span (or single face) inside targetCropW with
   // a minimum margin on both sides.
   function computeCropX(f: CropFrame): number {
     const scaledCx = Math.round(f.cx * scaleFactor);
     const scaledFaceW = (f.faceSpanW ?? 0) * scaleFactor;
-    const margin = Math.max(60, Math.min(150, (1080 - scaledFaceW) / 4));
+    const margin = Math.max(60, Math.min(150, (targetCropW - scaledFaceW) / 4));
     const faceLeft  = scaledCx - scaledFaceW / 2;
     const faceRight = scaledCx + scaledFaceW / 2;
-    const xMin = Math.max(0, Math.round(faceRight + margin) - 1080);
-    const xMax = Math.min(evenScaledWidth - 1080, Math.round(faceLeft  - margin));
+    const xMin = Math.max(0, Math.round(faceRight + margin) - targetCropW);
+    const xMax = Math.min(evenScaledWidth - targetCropW, Math.round(faceLeft  - margin));
     if (xMin <= xMax) {
       return Math.round((xMin + xMax) / 2);
     }
     // Face too wide for margins → just center on face
-    return Math.max(0, Math.min(evenScaledWidth - 1080, scaledCx - 540));
+    return Math.max(0, Math.min(evenScaledWidth - targetCropW, scaledCx - Math.round(targetCropW / 2)));
   }
 
   // ── Helper: compute crop Y for a given frame ────────────────────────────
-  // Places face center at ~35% from top of the 1920px crop
-  // (eyes land in the upper-third — natural portrait framing).
-  // HEAD_ROOM = fraction of crop height above the face center.
-  // 0.35 means face center sits 35% down = 672px from top in 1920px crop.
-  const HEAD_ROOM = 0.35;
+  const HEAD_ROOM = targetAR === '9:16' ? 0.35 : 0.40;
   function computeCropY(f: CropFrame): number {
     const scaledCy = Math.round(f.cy * scaleFactor);
-    // Desired top of crop: place face center at HEAD_ROOM × 1920
-    let cropY = Math.round(scaledCy - HEAD_ROOM * 1920);
+    // Desired top of crop: place face center at HEAD_ROOM × targetCropH
+    let cropY = Math.round(scaledCy - HEAD_ROOM * targetCropH);
     // Clamp so crop never exceeds the scaled frame
-    cropY = Math.max(0, Math.min(maxScaledH - 1920, cropY));
+    cropY = Math.max(0, Math.min(maxScaledH - targetCropH, cropY));
     return cropY;
   }
 
   // ── Safety net: empty useFrames ─────────────────────────────────────────
   if (useFrames.length === 0) {
     const sf = targetScaleH / srcHeight;
-    const sw = Math.max(1080, Math.round(srcWidth * sf) % 2 === 0 ? Math.round(srcWidth * sf) : Math.round(srcWidth * sf) + 1);
+    const sw = Math.max(targetCropW, Math.round(srcWidth * sf) % 2 === 0 ? Math.round(srcWidth * sf) : Math.round(srcWidth * sf) + 1);
     const avgCx = cropFrames.length > 0
       ? Math.round(cropFrames.reduce((s, f) => s + f.cx, 0) / cropFrames.length * sf)
       : Math.round(sw / 2);
     const avgCy = cropFrames.length > 0
       ? Math.round(cropFrames.reduce((s, f) => s + f.cy, 0) / cropFrames.length * sf)
       : Math.round(targetScaleH * HEAD_ROOM);
-    const cropX = Math.max(0, Math.min(sw - 1080, avgCx - 540));
-    const cropY = Math.max(0, Math.min(targetScaleH - 1920, avgCy - Math.round(HEAD_ROOM * 1920)));
-    return `scale=${sw}:${targetScaleH},crop=1080:1920:${cropX}:${cropY}`;
+    const cropX = Math.max(0, Math.min(sw - targetCropW, avgCx - Math.round(targetCropW / 2)));
+    const cropY = Math.max(0, Math.min(targetScaleH - targetCropH, avgCy - Math.round(HEAD_ROOM * targetCropH)));
+    return `scale=${sw}:${targetScaleH},crop=${targetCropW}:${targetCropH}:${cropX}:${cropY}`;
   }
 
   // ── Single frame ─────────────────────────────────────────────────────────
   if (useFrames.length === 1) {
     const cropX = computeCropX(useFrames[0]);
     const cropY = computeCropY(useFrames[0]);
-    return `scale=${evenScaledWidth}:${targetScaleH},crop=1080:1920:${cropX}:${cropY}`;
+    return `scale=${evenScaledWidth}:${targetScaleH},crop=${targetCropW}:${targetCropH}:${cropX}:${cropY}`;
   }
 
   // ── Multi-frame: build keyframe timeline ─────────────────────────────────
@@ -310,15 +402,15 @@ function buildCropFilter(cropFrames: CropFrame[], startMs: number, _endMs: numbe
   const cropXExpr = buildLerpExpr('x');
   const cropYExpr = buildLerpExpr('y');
 
-  const maxX = evenScaledWidth - 1080;
-  const maxY = maxScaledH - 1920;
+  const maxX = evenScaledWidth - targetCropW;
+  const maxY = maxScaledH - targetCropH;
 
   const clampedX = `min(max(${cropXExpr}\\,0)\\,${maxX})`;
   const clampedY = maxY > 0
     ? `min(max(${cropYExpr}\\,0)\\,${maxY})`
-    : '0'; // source exactly 1920h — no vertical movement possible
+    : '0'; // source fits vertically — no vertical movement needed
 
-  return `scale=${evenScaledWidth}:${targetScaleH},crop=1080:1920:${clampedX}:${clampedY}`;
+  return `scale=${evenScaledWidth}:${targetScaleH},crop=${targetCropW}:${targetCropH}:${clampedX}:${clampedY}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +447,7 @@ function buildLogoFilterComplex(
   // 3. Overlay [logo] on [base] → [vout]
   return (
     `[0:v]${baseVf}[base];` +
-    `[1:v]scale=${logoW}:-1,` +
+    `[1:v]format=rgba,scale=${logoW}:-1,` +
     `colorchannelmixer=aa=${logo.opacity.toFixed(3)}[logo];` +
     `[base][logo]overlay=${x}:${y}[vout]`
   );
@@ -383,6 +475,23 @@ function getVideoDimensions(filePath: string): { width: number; height: number }
   return { width: 1920, height: 1080 }; // safe default
 }
 
+function hasAudioStream(filePath: string): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { execSync } = require('child_process') as typeof import('child_process');
+    const raw = execSync(
+      `ffprobe -v quiet -print_format json -show_streams -select_streams a "${filePath}"`,
+      { stdio: 'pipe', timeout: 10000 }
+    ).toString();
+    const data = JSON.parse(raw) as { streams: Array<unknown> };
+    return !!(data?.streams && data.streams.length > 0);
+  } catch (err) {
+    log.warn({ filePath, err }, 'ffprobe failed to check audio streams, assuming yes');
+    return true;
+  }
+}
+
+
 // ---------------------------------------------------------------------------
 // Split layout filter builder
 // ---------------------------------------------------------------------------
@@ -403,6 +512,40 @@ function getVideoDimensions(filePath: string): { width: number; height: number }
  *
  * assPath is applied to the bottom/right panel only (where the main speaker is).
  */
+function computeLogoCoords(logo: LogoOverlay): { lx: string; ly: string } {
+  const margin = logo.margin;
+  let lx: string;
+  let ly: string;
+
+  if (logo.y !== undefined) {
+    ly = `${Math.round(logo.y)}`;
+  } else {
+    switch (logo.position) {
+      case 'top-left':
+      case 'top-right':    ly = `${margin}`; break;
+      case 'bottom-left':
+      case 'bottom-right': ly = `H-h-${margin}`; break;
+      case 'center':       ly = `(H-h)/2`; break;
+      default:             ly = `${margin}`;
+    }
+  }
+
+  if (logo.x !== undefined) {
+    lx = `${Math.round(logo.x)}`;
+  } else {
+    switch (logo.position) {
+      case 'top-left':
+      case 'bottom-left':  lx = `${margin}`; break;
+      case 'top-right':
+      case 'bottom-right': lx = `W-w-${margin}`; break;
+      case 'center':       lx = `(W-w)/2`; break;
+      default:             lx = `W-w-${margin}`;
+    }
+  }
+
+  return { lx, ly };
+}
+
 function buildSplitFilterComplex(
   splitLayout: import('../../shared/types').SplitLayout,
   cropFrames: CropFrame[],
@@ -412,27 +555,20 @@ function buildSplitFilterComplex(
   logo?: LogoOverlay,
   speakerPositions?: Array<{ cx: number; cy: number }>,
 ): string {
-  // Escape ASS path for FFmpeg
-  const assEsc = assPath.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '$1\\:');
+  // Escape ASS path for FFmpeg filter_complex subtitles filter
+  // Use filename= prefix to prevent Windows drive letter being parsed as option key
+  const escaped = assPath.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '$1\\:');
+  const assEsc = getAssEsc(escaped);
 
   // Helper: append logo overlay on top of [sub] → [vout] if logo provided
   // Logo input is [1:v] (second -i in ffmpegArgs)
   const withLogo = (graph: string): string => {
     if (!logo) return graph.replace('[sub]', '[vout]');
     const logoW  = Math.round(1080 * logo.scale);
-    const margin = logo.margin;
-    let lx: string, ly: string;
-    switch (logo.position) {
-      case 'top-left':     lx = `${margin}`;     ly = `${margin}`;     break;
-      case 'top-right':    lx = `W-w-${margin}`; ly = `${margin}`;     break;
-      case 'bottom-left':  lx = `${margin}`;     ly = `H-h-${margin}`; break;
-      case 'bottom-right': lx = `W-w-${margin}`; ly = `H-h-${margin}`; break;
-      case 'center':       lx = `(W-w)/2`;       ly = `(H-h)/2`;       break;
-      default:             lx = `W-w-${margin}`; ly = `${margin}`;
-    }
+    const { lx, ly } = computeLogoCoords(logo);
     return (
       graph +
-      `;[1:v]scale=${logoW}:-1,colorchannelmixer=aa=${logo.opacity.toFixed(3)}[logo];` +
+      `;[1:v]format=rgba,scale=${logoW}:-1,colorchannelmixer=aa=${logo.opacity.toFixed(3)}[logo];` +
       `[sub][logo]overlay=${lx}:${ly}[vout]`
     );
   };
@@ -467,7 +603,7 @@ function buildSplitFilterComplex(
       `[src1]crop=540:1920:${lx}:0[left];` +
       `[src2]crop=540:1920:${rx}:0[right];` +
       `[left][right]hstack=inputs=2[stacked];` +
-      `[stacked]subtitles='${assEsc}'[sub]`
+      `[stacked]subtitles=${assEsc}[sub]`
     );
   }
 
@@ -539,7 +675,7 @@ function buildSplitFilterComplex(
       `[tl][tr]hstack=inputs=2[top];` +
       `[bl][br]hstack=inputs=2[bot];` +
       `[top][bot]vstack=inputs=2[stacked];` +
-      `[stacked]subtitles='${assEsc}'[sub]`
+      `[stacked]subtitles=${assEsc}[sub]`
     );
   }
 
@@ -562,7 +698,7 @@ function buildSplitFilterComplex(
     `[src1]crop=1080:960:${leftX}:${topY}[top];` +
     `[src2]crop=1080:960:${rightX}:${bottomY}[bot];` +
     `[top][bot]vstack=inputs=2[stacked];` +
-    `[stacked]subtitles='${assEsc}'[sub]`
+    `[stacked]subtitles=${assEsc}[sub]`
   );
 }
 
@@ -595,8 +731,10 @@ function buildGameFilterComplex(
   gamePosition: GamePosition = 'top',
   logo?: LogoOverlay,
 ): string {
-  // Escape ASS path for FFmpeg
-  const assEsc = assPath.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '$1\\:');
+  // Escape ASS path for FFmpeg filter_complex subtitles filter
+  // Use filename= prefix to prevent Windows drive letter being parsed as option key
+  const escaped = assPath.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '$1\\:');
+  const assEsc = getAssEsc(escaped);
 
   // ── Background crop position (average — safe for filter_complex) ─────────
   // Strategy for game layout: show streamer face in the visible (non-gameplay) area.
@@ -731,7 +869,7 @@ function buildGameFilterComplex(
       `[src1]crop=${pipSrcW}:${pipSrcH}:${pipSrcX}:${pipSrcY},scale=${pipW}:${pipH}[pip];` +
       `[src2]crop=${bgCropW}:${bgCropH}:${bgCropX}:${bgCropY},scale=1080:${streamerH}[bg];` +
       `[pip][bg]vstack=inputs=2[stacked];` +
-      `[stacked]subtitles='${assEsc}'[sub]`
+      `[stacked]subtitles=${assEsc}[sub]`
     )
     : (
       // Streamer on top, gameplay on bottom
@@ -739,7 +877,7 @@ function buildGameFilterComplex(
       `[src1]crop=${bgCropW}:${bgCropH}:${bgCropX}:${bgCropY},scale=1080:${streamerH}[bg];` +
       `[src2]crop=${pipSrcW}:${pipSrcH}:${pipSrcX}:${pipSrcY},scale=${pipW}:${pipH}[pip];` +
       `[bg][pip]vstack=inputs=2[stacked];` +
-      `[stacked]subtitles='${assEsc}'[sub]`
+      `[stacked]subtitles=${assEsc}[sub]`
     );
 
   if (!logo) {
@@ -748,23 +886,186 @@ function buildGameFilterComplex(
 
   // Logo overlay — [1:v] is the logo input (second -i in ffmpegArgs)
   const logoW = Math.round(1080 * logo.scale);
-  const margin = logo.margin;
-  let lx: string;
-  let ly: string;
-  switch (logo.position) {
-    case 'top-left':     lx = `${margin}`;      ly = `${margin}`;      break;
-    case 'top-right':    lx = `W-w-${margin}`;  ly = `${margin}`;      break;
-    case 'bottom-left':  lx = `${margin}`;      ly = `H-h-${margin}`;  break;
-    case 'bottom-right': lx = `W-w-${margin}`;  ly = `H-h-${margin}`;  break;
-    case 'center':       lx = `(W-w)/2`;        ly = `(H-h)/2`;        break;
-    default:             lx = `W-w-${margin}`;  ly = `${margin}`;
-  }
+  const { lx, ly } = computeLogoCoords(logo);
 
   return (
     baseGraph + `;` +
-    `[1:v]scale=${logoW}:-1,colorchannelmixer=aa=${logo.opacity.toFixed(3)}[logo];` +
+    `[1:v]format=rgba,scale=${logoW}:-1,colorchannelmixer=aa=${logo.opacity.toFixed(3)}[logo];` +
     `[sub][logo]overlay=${lx}:${ly}[vout]`
   );
+}
+
+// ---------------------------------------------------------------------------
+// Letterbox layout filter builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build FFmpeg -vf filter string for letterbox layout.
+ *
+ * Fits the source video (any AR) inside 1080×1920, centres it, and fills the
+ * remaining canvas with one of:
+ *   blur  — blurred+scaled copy of the source (YouTube Shorts style)
+ *   color — solid hex colour
+ *   image — user-supplied image file (second -i in ffmpegArgs)
+ *
+ * Returns { vf, needsImageInput } — caller must prepend '-i imagePath' when
+ * needsImageInput is true.
+ *
+ * For blur bg we use filter_complex; for color/image we use -vf only.
+ * All paths returned are filter strings, NOT filter_complex strings.
+ */
+function buildLetterboxFilter(
+  assForFfmpeg: string,
+  bg: LetterboxBackground,
+  logo?: LogoOverlay,
+  cropFilter?: string,
+): { filterComplex: string; mapVideo: string; needsImageInput: boolean } {
+  const blurRadius = Math.max(5, Math.min(40, Math.round((bg.blurRadius ?? 30) * 0.8)));
+  const color      = (bg.color ?? '#000000').replace('#', '');
+  const cropMode   = bg.crop ?? 'original';
+
+  let fgPrep = '';
+  if (cropMode === 'custom' && bg.cropBox) {
+    const cx = bg.cropBox.x % 2 === 0 ? bg.cropBox.x : bg.cropBox.x + 1;
+    const cy = bg.cropBox.y % 2 === 0 ? bg.cropBox.y : bg.cropBox.y + 1;
+    const cw = bg.cropBox.w % 2 === 0 ? bg.cropBox.w : bg.cropBox.w - 1;
+    const ch = bg.cropBox.h % 2 === 0 ? bg.cropBox.h : bg.cropBox.h - 1;
+    fgPrep = `crop=${cw}:${ch}:${cx}:${cy},`;
+  } else if (cropFilter && cropMode !== 'original') {
+    // Subject tracking is active. cropFilter is generated directly for target AR (1:1, 4:3, or 9:16)
+    fgPrep = `${cropFilter},`;
+  } else {
+    // Subject tracking is inactive. Center-crop original source.
+    if (cropMode === '4:3') {
+      fgPrep = `crop='min(iw,ih*4/3)':'min(ih,iw*3/4)',`;
+    } else if (cropMode === '1:1') {
+      fgPrep = `crop='min(iw,ih)':'min(iw,ih)',`;
+    }
+  }
+
+  // Foreground: (optional crop →) scale source to FIT inside 1080×1920 (contain, no pad).
+  // Output size will be smaller than canvas on one axis — overlay centres it on bg.
+  // Subtitle burned AFTER overlay so it renders on the full 1080×1920 canvas.
+  const fgFilter =
+    `${fgPrep}scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,` +
+    `setsar=1`;
+
+  // Subtitle burn — applied to final 1080×1920 composite
+  // Use filename= prefix to prevent FFmpeg from misinterpreting Windows drive letter as option key
+  const subsBurn = `subtitles=${getAssEsc(assForFfmpeg)}`;
+
+  let fc = '';
+  if (bg.type === 'blur') {
+    const bgFilter =
+      `scale=1080:1920:force_original_aspect_ratio=increase:flags=bicubic,` +
+      `crop=1080:1920,` +
+      `boxblur=luma_radius=${blurRadius}:luma_power=3,` +
+      `setsar=1`;
+
+    fc =
+      `[0:v]split=2[bgSrc][fgSrc];` +
+      `[bgSrc]${bgFilter}[bg];` +
+      `[fgSrc]${fgFilter}[fg];` +
+      `[bg][fg]overlay=(W-w)/2:(H-h)/2,${subsBurn}[sub_vout]`;
+  } else if (bg.type === 'image') {
+    const bgFilter =
+      `[1:v]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,` +
+      `crop=1080:1920,setsar=1[bg];`;
+
+    fc =
+      bgFilter +
+      `[0:v]${fgFilter}[fg];` +
+      `[bg][fg]overlay=(W-w)/2:(H-h)/2,${subsBurn}[sub_vout]`;
+  } else {
+    // color bg — lavfi color source (no input needed)
+    // fps=0 lets FFmpeg infer from output; no r= param to avoid fps mismatch with source
+    fc =
+      `color=c=#${color}:s=1080x1920[bg];` +
+      `[0:v]${fgFilter}[fg];` +
+      `[bg][fg]overlay=(W-w)/2:(H-h)/2,${subsBurn}[sub_vout]`;
+  }
+
+  if (logo) {
+    const logoW = Math.round(1080 * logo.scale);
+    const logoInputIdx = bg.type === 'image' ? 2 : 1;
+    const { lx, ly } = computeLogoCoords(logo);
+    fc += `;[${logoInputIdx}:v]format=rgba,scale=${logoW}:-1,colorchannelmixer=aa=${logo.opacity.toFixed(3)}[logo];` +
+          `[sub_vout][logo]overlay=${lx}:${ly}[vout]`;
+    return { filterComplex: fc, mapVideo: '[vout]', needsImageInput: bg.type === 'image' };
+  } else {
+    fc = fc.replace('[sub_vout]', '[vout]');
+    return { filterComplex: fc, mapVideo: '[vout]', needsImageInput: bg.type === 'image' };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Title overlay builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build ASS Dialogue lines for a static title overlay.
+ * Returns { styleBlock, dialogueLine } to be injected at the correct positions.
+ * Style must go into [V4+ Styles], dialogue into [Events].
+ */
+function buildTitleEvents(
+  title: TitleOverlay,
+  durationMs: number,
+): { styleLine: string; dialogueLine: string } | null {
+  if (!title.text.trim()) return null;
+
+  const primaryAss  = hexToAss(title.color);
+  const outlineAss  = hexToAss(title.outlineColor);
+  const backAss     = '&H80000000';
+  const text        = title.uppercase ? title.text.trim().toUpperCase() : title.text.trim();
+  const bold        = title.bold ? 1 : 0;
+
+  const fmt = (ms: number): string => {
+    const h  = Math.floor(ms / 3_600_000);
+    const m  = Math.floor((ms % 3_600_000) / 60_000);
+    const s  = Math.floor((ms % 60_000) / 1_000);
+    const cs = Math.floor((ms % 1_000) / 10);
+    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+  };
+
+  const styleLine =
+    `Style: Title,${title.font},${title.fontSize},${primaryAss},&H000000FF,${outlineAss},${backAss},${bold},0,0,0,100,100,1,0,1,${title.outlineSize},0,2,60,60,0,1`;
+
+  const posTag     = `{\\an2\\pos(540,${title.y})}`;
+  const dialogueLine = `Dialogue: 1,${fmt(0)},${fmt(durationMs)},Title,,0,0,0,,${posTag}${text}`;
+
+  return { styleLine, dialogueLine };
+}
+
+// ---------------------------------------------------------------------------
+// Custom Font Directory Helper
+// ---------------------------------------------------------------------------
+
+function getFontsDir(): string | null {
+  const paths = [
+    path.join(process.resourcesPath ?? '', 'resources', 'fonts'),
+    path.join(__dirname, '..', '..', '..', 'resources', 'fonts'),
+    path.join(__dirname, '..', '..', 'resources', 'fonts'),
+  ];
+  for (const p of paths) {
+    if (fs.existsSync(p)) {
+      return p;
+    }
+  }
+  return null;
+}
+
+function getEscapedFontsDir(): string | null {
+  const fontsDir = getFontsDir();
+  if (!fontsDir) return null;
+  return fontsDir.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '$1\\:');
+}
+
+function getAssEsc(escapedAssPath: string): string {
+  const fontsDirEsc = getEscapedFontsDir();
+  if (fontsDirEsc) {
+    return `filename='${escapedAssPath}':fontsdir='${fontsDirEsc}'`;
+  }
+  return `filename='${escapedAssPath}'`;
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +1074,9 @@ function buildGameFilterComplex(
 
 /** Convert old SubtitleStyle + SubtitlePosition to a CaptionStyle */
 function legacyToCaptionStyle(style: SubtitleStyle, position: SubtitlePosition): CaptionStyle {
+  if (style === 'none') {
+    return { ...CAPTION_PRESETS['none'], presetId: 'none', position };
+  }
   if (style === 'bold-white') {
     return { ...CAPTION_PRESETS['hormozi'], presetId: 'hormozi', position };
   }
@@ -820,6 +1124,13 @@ async function detectLoudWords(
 ): Promise<Set<number>> {
   const loudIndices = new Set<number>();
 
+  // Limit to avoid spawning too many processes on Windows
+  if (clipWords.length > 40) {
+    log.info({ wordCount: clipWords.length }, 'Skipping loudness detection: too many words');
+    return loudIndices;
+  }
+
+
   // Batch: one FFmpeg call per word would be too slow.
   // Instead run a single pass over the full clip and sample RMS per word
   // using the `astats=metadata=1:reset=1` filter with `-af` select.
@@ -830,6 +1141,8 @@ async function detectLoudWords(
   const candidates = clipWords
     .map((w, i) => ({ i, startMs: w.startMs, endMs: w.endMs }))
     .filter(({ startMs, endMs }) => endMs - startMs >= 100);
+
+  const results: Array<{ i: number; db: number }> = [];
 
   // Run all probes in parallel (capped at 8 concurrent) for speed
   const CONCURRENCY = 8;
@@ -863,13 +1176,26 @@ async function detectLoudWords(
           setTimeout(() => { proc.kill(); resolve(-999); }, 8_000);
         });
 
-        if (rmsDb >= thresholdDb) {
-          loudIndices.add(i);
+        if (rmsDb > -900) {
+          results.push({ i, db: rmsDb });
         }
       } catch {
         // Non-fatal — just skip this word
       }
     }));
+  }
+
+  // Dynamic loudness threshold: select words within 4.0 dB of peak volume in clip OR >= thresholdDb
+  // This ensures shake effect works on normalized TTS voice (which averages -22dB to -26dB) as well as loud video audio
+  if (results.length > 0) {
+    const validDbs = results.map(r => r.db);
+    const maxDb = Math.max(...validDbs);
+    const cutoffDb = Math.min(thresholdDb, maxDb - 4.0);
+    for (const { i, db } of results) {
+      if (db >= cutoffDb) {
+        loudIndices.add(i);
+      }
+    }
   }
 
   return loudIndices;
@@ -885,6 +1211,10 @@ async function detectLoudWords(
  */
 function basePos(style: CaptionStyle): { x: number; y: number } {
   const x = 540; // horizontal center
+  // captionY overrides preset position — anchor is bottom-center of text block
+  if (style.captionY !== undefined) {
+    return { x, y: style.captionY };
+  }
   const y = style.position === 'lower-third' ? 1750
     : style.position === 'upper-third' ? 170
     : 960; // center
@@ -906,10 +1236,30 @@ async function buildAssSubtitles(
   style: CaptionStyle,
   sourceFile?: string,
 ): Promise<string> {
+  if (style.presetId === 'none') {
+    return `[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 1
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,10,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,1,0,1,1,1,2,60,60,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+`;
+  }
+
   // Filter words within clip range, offset to clip-relative time
   const clipWords = words
-    .filter((w) => w.startMs >= startMs && w.endMs <= endMs)
-    .map((w) => ({ ...w, startMs: w.startMs - startMs, endMs: w.endMs - startMs }));
+    .filter((w) => w.startMs < endMs && w.endMs > startMs)
+    .map((w) => ({
+      ...w,
+      startMs: Math.max(0, w.startMs - startMs),
+      endMs: Math.min(endMs - startMs, w.endMs - startMs)
+    }));
 
   // ── Loudness detection ────────────────────────────────────────────────────
   let loudSet = new Set<number>();
@@ -926,10 +1276,16 @@ async function buildAssSubtitles(
   const highlightAss = hexToAss(style.highlightColor);
   const backAss      = '&H80000000';
 
-  const alignment = style.position === 'lower-third' ? 2
+  // When captionY is set: use alignment 2 (bottom-center) so \pos Y = bottom edge of text.
+  // When using preset positions: keep original alignment so MarginV works correctly.
+  const alignment = style.captionY !== undefined
+    ? 2  // bottom-center anchor, position via \pos
+    : style.position === 'lower-third' ? 2
     : style.position === 'upper-third' ? 8
     : 5;
-  const marginV = style.position === 'lower-third' ? 120
+  const marginV = style.captionY !== undefined
+    ? 0  // \pos overrides margin
+    : style.position === 'lower-third' ? 120
     : style.position === 'upper-third' ? 120
     : 0;
 
@@ -1024,7 +1380,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         }).join(' ');
 
         const animPrefix = style.animation === 'fade' ? '{\\fad(150,150)}' : '';
-        const text = `${animPrefix}{\\an${alignment}}${lineText}`;
+        const posTag = style.captionY !== undefined ? `{\\pos(${baseX},${baseY})}` : '';
+        const text = `${animPrefix}{\\an${alignment}}${posTag}${lineText}`;
 
         dialogueLines.push(
           `Dialogue: 0,${fmt(activeWord.startMs)},${fmt(activeWord.endMs)},Default,,0,0,0,,${text}`
@@ -1074,9 +1431,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     if (!isLoud) {
       // ── Normal word: single dialogue event ───────────────────────────────
-      // \an2/8/5 = alignment anchor matching style (so \pos works correctly)
       const anTag = `{\\an${alignment}}`;
-      const text = `${anTag}${bouncyTag}${colorTag}${extraAnimTag}${wordText}`;
+      // When captionY set: add explicit \pos so position is exact, not margin-driven
+      const posTag = style.captionY !== undefined ? `{\\pos(${baseX},${baseY})}` : '';
+      const text = `${anTag}${posTag}${bouncyTag}${colorTag}${extraAnimTag}${wordText}`;
       dialogueLines.push(
         `Dialogue: 0,${fmt(w.startMs)},${fmt(w.endMs)},Default,,0,0,0,,${text}`
       );
@@ -1199,37 +1557,50 @@ export class Processor {
     // Resolve caption style: use captionStyle if provided, else convert legacy subtitleStyle
     const resolvedCaption: CaptionStyle = opts.captionStyle ?? legacyToCaptionStyle(subtitleStyle, subtitlePosition);
 
-    const assPath = path.join(os.tmpdir(), `clip-${clipId}.ass`);
+    // Write ASS to a safe temp path: only alphanumeric + hyphens, no spaces.
+    // Use a sanitised clipId (strip any non-alnum chars) so the path is
+    // guaranteed free of spaces, colons, or other FFmpeg filter special chars.
+    const safeId   = clipId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const assPath  = path.join(os.tmpdir(), `clip_${safeId}.ass`);
     // Pass sourceFile so loudness detection can mark loud words for shake effect
     const assContent = await buildAssSubtitles(words, startMs, endMs, resolvedCaption, sourceFile);
-    fs.writeFileSync(assPath, assContent, 'utf-8');
+    // Inject title overlay: style into [V4+ Styles], dialogue into [Events]
+    let finalAss = assContent;
+    if (opts.titleOverlay) {
+      const titleResult = buildTitleEvents(opts.titleOverlay, endMs - startMs);
+      if (titleResult) {
+        // Insert style line before [Events] — use regex to handle both \r\n and \n line endings
+        finalAss = finalAss.replace(
+          /\r?\n\r?\n\[Events\]/,
+          `\n${titleResult.styleLine}\n\n[Events]`
+        );
+        finalAss += titleResult.dialogueLine + '\n';
+      }
+    }
+    fs.writeFileSync(assPath, finalAss, 'utf-8');
 
     emitProgress(clipId, 25);
 
     try {
-      const cropFilter = buildCropFilter(cropFrames, startMs, endMs, srcWidth, srcHeight);
+      const letterboxCropMode = (opts.layoutPreset ?? 'normal') === 'letterbox' ? (opts.letterboxBg?.crop ?? 'original') : '9:16';
+      const targetAR: '9:16' | '1:1' | '4:3' = letterboxCropMode === '1:1' ? '1:1' : letterboxCropMode === '4:3' ? '4:3' : '9:16';
+      const cropFilter = buildCropFilter(cropFrames, startMs, endMs, srcWidth, srcHeight, targetAR);
 
-      // On Windows, FFmpeg's ass/subtitles filter requires special path escaping:
-      // backslashes → forward slashes, colons escaped as \:
-      // We copy the ASS file to the same directory as the output to use a
-      // simple relative-style path, avoiding drive letter colon issues.
-      const assNearOutput = outputPath.replace(/\.mp4$/i, '.ass');
-      fs.copyFileSync(assPath, assNearOutput);
-
-      // Build escaped path for FFmpeg subtitles filter on Windows:
-      // 1. Replace backslashes with forward slashes
-      // 2. Escape colons (drive letter C: → C\:) 
-      // 3. Escape single quotes inside path
-      // 4. Also escape backslash-colon sequences properly
-      const assForFfmpeg = assNearOutput
+      // Build escaped path for FFmpeg subtitles / ass filter on Windows.
+      // assPath is already in os.tmpdir() — typically no spaces.
+      // Escape: backslashes → forward slashes, drive-letter colon → \:
+      // Do NOT escape spaces here because assPath should have none;
+      // if tmpdir somehow contains spaces we escape those too.
+      const assForFfmpeg = assPath
         .replace(/\\/g, '/')
-        .replace(/:/g, '\\:');
+        .replace(/^([A-Za-z]):/, '$1\\:');
 
-      log.info({ clipId, assNearOutput, assForFfmpeg }, 'ASS subtitle path');
+      log.info({ clipId, assPath, assForFfmpeg }, 'ASS subtitle path');
 
       const layoutPreset = opts.layoutPreset ?? 'normal';
       const splitLayout  = opts.splitLayout  ?? 'top-bottom';
 
+      const useReplacementAudio = opts.audioMode === 'replace' && opts.replacementAudioPath && fs.existsSync(opts.replacementAudioPath);
       let ffmpegArgs: string[];
 
       if (layoutPreset === 'split') {
@@ -1237,20 +1608,34 @@ export class Processor {
         log.info({ clipId, splitLayout }, 'Using split layout');
         const logo = opts.logoOverlay && fs.existsSync(opts.logoOverlay.filePath)
           ? opts.logoOverlay : undefined;
-        const filterComplex = buildSplitFilterComplex(
-          splitLayout, cropFrames, assNearOutput, srcWidth, srcHeight, logo,
-          this._lastSpeakerPositions,
-        );
-        ffmpegArgs = [
+        let replacementAudioIdx = -1;
+        let inputs = [
           '-ss', String(startSec),
           '-t',  String(durationSec),
           '-i',  sourceFile,
-          ...(logo ? ['-i', logo.filePath] : []),
+        ];
+        let currentIdx = 1;
+        if (logo) {
+          inputs.push('-i', logo.filePath);
+          currentIdx++;
+        }
+        if (useReplacementAudio && opts.replacementAudioPath) {
+          inputs.push('-i', opts.replacementAudioPath);
+          replacementAudioIdx = currentIdx++;
+        }
+
+        const filterComplex = buildSplitFilterComplex(
+          splitLayout, cropFrames, assPath, srcWidth, srcHeight, logo,
+          this._lastSpeakerPositions,
+        );
+        ffmpegArgs = [
+          ...inputs,
           '-filter_complex', filterComplex,
           '-map', '[vout]',
-          '-map', '0:a?',
-          '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
-          '-c:a', 'aac', '-b:a', '320k',
+          '-map', replacementAudioIdx !== -1 ? `${replacementAudioIdx}:a` : '0:a?',
+          '-c:v', 'libx264', '-preset', 'medium', '-crf', '17',
+          '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+          '-max_muxing_queue_size', '1024',
           '-movflags', '+faststart',
           outputPath,
         ];
@@ -1262,58 +1647,154 @@ export class Processor {
         log.info({ clipId, gameRatio, gamePosition }, 'Using game layout');
         const logo = opts.logoOverlay && fs.existsSync(opts.logoOverlay.filePath)
           ? opts.logoOverlay : undefined;
-        const filterComplex = buildGameFilterComplex(
-          cropFrames, assNearOutput, srcWidth, srcHeight, gameRatio, gamePosition, logo
-        );
-        log.info({ clipId, filterComplex }, 'Game filter_complex');
-        ffmpegArgs = [
+        let replacementAudioIdx = -1;
+        let inputs = [
           '-ss', String(startSec),
           '-t',  String(durationSec),
           '-i',  sourceFile,
-          ...(logo ? ['-i', logo.filePath] : []),
+        ];
+        let currentIdx = 1;
+        if (logo) {
+          inputs.push('-i', logo.filePath);
+          currentIdx++;
+        }
+        if (useReplacementAudio && opts.replacementAudioPath) {
+          inputs.push('-i', opts.replacementAudioPath);
+          replacementAudioIdx = currentIdx++;
+        }
+
+        const filterComplex = buildGameFilterComplex(
+          cropFrames, assPath, srcWidth, srcHeight, gameRatio, gamePosition, logo
+        );
+        log.info({ clipId, filterComplex }, 'Game filter_complex');
+        ffmpegArgs = [
+          ...inputs,
           '-filter_complex', filterComplex,
           '-map', '[vout]',
-          '-map', '0:a?',
-          '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
-          '-c:a', 'aac', '-b:a', '320k',
+          '-map', replacementAudioIdx !== -1 ? `${replacementAudioIdx}:a` : '0:a?',
+          '-c:v', 'libx264', '-preset', 'medium', '-crf', '17',
+          '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+          '-max_muxing_queue_size', '1024',
+          '-movflags', '+faststart',
+          outputPath,
+        ];
+
+      } else if (layoutPreset === 'letterbox') {
+        // ── Letterbox layout: fit source into 9:16, fill bg with blur/color/image ──
+        const lbBg: LetterboxBackground = opts.letterboxBg ?? { type: 'blur' };
+        log.info({ clipId, lbBg }, 'Using letterbox layout');
+        const logo = opts.logoOverlay && fs.existsSync(opts.logoOverlay.filePath)
+          ? opts.logoOverlay : undefined;
+        const { filterComplex, mapVideo, needsImageInput } = buildLetterboxFilter(
+          assForFfmpeg, lbBg, logo, opts.zoomEnabled ? cropFilter : undefined
+        );
+        const imageInput = needsImageInput && lbBg.imagePath && fs.existsSync(lbBg.imagePath)
+          ? ['-i', lbBg.imagePath] : [];
+        const logoInput = logo ? ['-i', logo.filePath] : [];
+        // If image mode but file missing, fall back to blur
+        const effectiveFc = (needsImageInput && imageInput.length === 0)
+          ? buildLetterboxFilter(assForFfmpeg, { ...lbBg, type: 'blur' }, logo, opts.zoomEnabled ? cropFilter : undefined).filterComplex
+          : filterComplex;
+
+        let replacementAudioIdx = -1;
+        let inputs = [
+          '-ss', String(startSec),
+          '-t',  String(durationSec),
+          '-i',  sourceFile,
+          ...imageInput,
+          ...logoInput,
+        ];
+        let currentIdx = 1 + (imageInput.length > 0 ? 1 : 0) + (logoInput.length > 0 ? 1 : 0);
+        if (useReplacementAudio && opts.replacementAudioPath) {
+          inputs.push('-i', opts.replacementAudioPath);
+          replacementAudioIdx = currentIdx++;
+        }
+
+        ffmpegArgs = [
+          ...inputs,
+          '-filter_complex', effectiveFc,
+          '-map', mapVideo,
+          '-map', replacementAudioIdx !== -1 ? `${replacementAudioIdx}:a` : '0:a?',
+          '-c:v', 'libx264', '-preset', 'medium', '-crf', '17',
+          '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+          '-max_muxing_queue_size', '1024',
           '-movflags', '+faststart',
           outputPath,
         ];
 
       } else {
         // ── Normal layout: standard crop + optional logo ──────────────────
-        const baseVf = `${cropFilter},subtitles='${assForFfmpeg}'`;
+        // For -vf (no logo): plain subtitles='path' is fine
+        // For filter_complex (logo): must use subtitles=filename='path' to avoid Windows drive letter parse issue
+        const baseVfForVf  = `${cropFilter},subtitles=${getAssEsc(assForFfmpeg)}`;
+        const baseVfForFc  = `${cropFilter},subtitles=${getAssEsc(assForFfmpeg)}`;
 
         if (opts.logoOverlay && fs.existsSync(opts.logoOverlay.filePath)) {
-          const filterComplex = buildLogoFilterComplex(baseVf, opts.logoOverlay);
-          ffmpegArgs = [
+          const filterComplex = buildLogoFilterComplex(baseVfForFc, opts.logoOverlay);
+          let replacementAudioIdx = -1;
+          let inputs = [
             '-ss', String(startSec),
             '-t',  String(durationSec),
             '-i',  sourceFile,
             '-i',  opts.logoOverlay.filePath,
+          ];
+          let currentIdx = 2;
+          if (useReplacementAudio && opts.replacementAudioPath) {
+            inputs.push('-i', opts.replacementAudioPath);
+            replacementAudioIdx = currentIdx++;
+          }
+          ffmpegArgs = [
+            ...inputs,
             '-filter_complex', filterComplex,
             '-map', '[vout]',
-            '-map', '0:a?',
-            '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
-            '-c:a', 'aac', '-b:a', '320k',
+            '-map', replacementAudioIdx !== -1 ? `${replacementAudioIdx}:a` : '0:a?',
+            '-c:v', 'libx264', '-preset', 'medium', '-crf', '17',
+            '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+            '-max_muxing_queue_size', '1024',
             '-movflags', '+faststart',
             outputPath,
           ];
         } else {
-          ffmpegArgs = [
+          let replacementAudioIdx = -1;
+          let inputs = [
             '-ss', String(startSec),
             '-t',  String(durationSec),
             '-i',  sourceFile,
-            '-vf', baseVf,
-            '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
-            '-c:a', 'aac', '-b:a', '320k',
-            '-movflags', '+faststart',
-            outputPath,
           ];
+          let currentIdx = 1;
+          if (useReplacementAudio && opts.replacementAudioPath) {
+            inputs.push('-i', opts.replacementAudioPath);
+            replacementAudioIdx = currentIdx++;
+          }
+
+          if (replacementAudioIdx !== -1) {
+            ffmpegArgs = [
+              ...inputs,
+              '-filter_complex', `[0:v]${baseVfForVf}[vout]`,
+              '-map', '[vout]',
+              '-map', `${replacementAudioIdx}:a`,
+              '-c:v', 'libx264', '-preset', 'medium', '-crf', '17',
+              '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+              '-max_muxing_queue_size', '1024',
+              '-movflags', '+faststart',
+              outputPath,
+            ];
+          } else {
+            ffmpegArgs = [
+              ...inputs,
+              '-vf', baseVfForVf,
+              '-c:v', 'libx264', '-preset', 'medium', '-crf', '17',
+              '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+              '-max_muxing_queue_size', '1024',
+              '-movflags', '+faststart',
+              outputPath,
+            ];
+          }
         }
       }
 
-      log.info({ clipId, ffmpegCmd: ['ffmpeg', '-y', ...ffmpegArgs].join(' ') }, 'FFmpeg command');
+      const ffmpegCmd = ['ffmpeg', '-y', ...ffmpegArgs].join(' ');
+      log.info({ clipId, ffmpegCmd }, 'FFmpeg command');
 
       const { promise, proc } = runFfmpegWithProgress(clipId, ffmpegArgs, durationSec);
 
@@ -1323,7 +1804,7 @@ export class Processor {
       try {
         await promise;
       } catch (err) {
-        log.error({ clipId, err, ffmpegArgs: ffmpegArgs.join(' ') }, 'FFmpeg failed');
+        log.error({ clipId, ffmpegCmd, err }, 'FFmpeg failed');
 
         // ── Retry without subtitles to isolate whether the ASS filter is the issue ──
         if (layoutPreset === 'normal' && !opts.logoOverlay) {
@@ -1334,12 +1815,13 @@ export class Processor {
             '-t',  String(durationSec),
             '-i',  sourceFile,
             '-vf', fallbackVf,
-            '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
-            '-c:a', 'aac', '-b:a', '320k',
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+            '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
             '-movflags', '+faststart',
             outputPath,
           ];
-          log.info({ clipId, ffmpegCmd: ['ffmpeg', '-y', ...fallbackArgs].join(' ') }, 'FFmpeg fallback command (no subs)');
+          const fallbackCmd = ['ffmpeg', '-y', ...fallbackArgs].join(' ');
+          log.info({ clipId, fallbackCmd }, 'FFmpeg fallback command (no subs)');
           const { promise: p2, proc: proc2 } = runFfmpegWithProgress(clipId, fallbackArgs, durationSec);
           this.activeProcs.set(clipId, proc2);
           try {
@@ -1358,13 +1840,10 @@ export class Processor {
         this.activeProcs.delete(clipId);
       }
 
-      emitProgress(clipId, 100);
+      emitProgress(clipId, 98);
       log.info({ clipId }, 'Clip processing complete');
     } finally {
       try { fs.unlinkSync(assPath); } catch { /* ignore */ }
-      // Clean up the copy near output too
-      const assNearOutput = outputPath.replace(/\.mp4$/i, '.ass');
-      try { fs.unlinkSync(assNearOutput); } catch { /* ignore */ }
     }
 
     // ── Step 3.5: Audio treatment — mute or replace the original audio ───
@@ -1381,10 +1860,18 @@ export class Processor {
     }
 
     // ── Step 4: Prepend thumbnail image as 1-second still frame ──────────
+    const cleanPath = outputPath.replace(/\.mp4$/i, '_clean.mp4');
+    try {
+      fs.copyFileSync(outputPath, cleanPath);
+    } catch (err) {
+      log.warn({ clipId, err }, 'Failed to backup clean video');
+    }
+
     if (opts.thumbnailPath && fs.existsSync(opts.thumbnailPath)) {
       log.info({ clipId, thumbnailPath: opts.thumbnailPath }, 'Prepending thumbnail as 1s intro');
+      emitProgress(clipId, 99);
       try {
-        await this._prependThumbnail(clipId, outputPath, opts.thumbnailPath);
+        await this.prependThumbnail(clipId, cleanPath, outputPath, opts.thumbnailPath);
       } catch (err) {
         log.warn({ clipId, err }, 'Thumbnail prepend failed, clip still usable without it');
       }
@@ -1441,6 +1928,245 @@ export class Processor {
   }
 
   // ---------------------------------------------------------------------------
+  // Preview frame renderer
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Render a single JPEG frame with the EXACT same FFmpeg filter stack that
+   * will be used during clip generation (crop + subtitle + letterbox/logo).
+   *
+   * Used by the preview panel to show a pixel-accurate preview.
+   * Returns base64-encoded JPEG string, or null on failure.
+   *
+   * @param opts  Subset of ProcessOptions — sourceFile, startMs, endMs, words,
+   *              captionStyle, layoutPreset, letterboxBg, logoOverlay, etc.
+   *              previewTimestampMs: which frame to render (default = startMs+1s)
+   */
+  async renderPreviewFrame(opts: {
+    sourceFile:     string;
+    startMs:        number;
+    endMs:          number;
+    words:          TranscriptWord[];
+    captionStyle:   CaptionStyle;
+    layoutPreset?:  LayoutPreset;
+    splitLayout?:   import('../../shared/types').SplitLayout;
+    gameRatio?:     import('../../shared/types').GameRatio;
+    gamePosition?:  import('../../shared/types').GamePosition;
+    letterboxBg?:   LetterboxBackground;
+    logoOverlay?:   LogoOverlay;
+    titleOverlay?:  TitleOverlay;
+    zoomEnabled?:   boolean;
+    previewTimestampMs?: number;
+    trackingMode?:  'auto' | 'manual' | 'none' | 'speaker';
+    subjectBbox?:   { x: number; y: number; w: number; h: number };
+    subjectSeedMs?: number;
+  }): Promise<string | null> {
+    const {
+      sourceFile, startMs, endMs, words,
+      captionStyle, layoutPreset = 'normal',
+      splitLayout = 'top-bottom', gameRatio = '50-50', gamePosition = 'top',
+      letterboxBg, logoOverlay, zoomEnabled = false,
+      trackingMode = 'auto', subjectBbox, subjectSeedMs,
+    } = opts;
+
+    if (!fs.existsSync(sourceFile)) return null;
+
+    // Frame to capture — prefer a timestamp where caption words are active.
+    // Find the midpoint of the clip's word range, falling back to clip midpoint.
+    const durationMs = endMs - startMs;
+    let frameTimestampMs: number;
+    if (opts.previewTimestampMs !== undefined) {
+      frameTimestampMs = opts.previewTimestampMs;
+    } else {
+      // Find a word in the middle of the clip to guarantee caption is visible
+      const clipWords = words.filter((w) => w.startMs >= startMs && w.endMs <= endMs);
+      if (clipWords.length > 0) {
+        const midWord = clipWords[Math.floor(clipWords.length / 2)];
+        // Seek to middle of that word — caption will be active
+        frameTimestampMs = Math.floor((midWord.startMs + midWord.endMs) / 2);
+      } else {
+        frameTimestampMs = startMs + Math.min(1000, Math.floor(durationMs / 2));
+      }
+    }
+    // Clip-relative offset for the desired frame (0 = clip start)
+    const frameOffsetMs = frameTimestampMs - startMs;
+    const frameOffsetSec = frameOffsetMs / 1000;
+    // Input seek to clip start; output seek for frame offset within the clip.
+    // Input seeking resets PTS to ~0, matching clip-relative ASS timestamps.
+    const startSec = startMs / 1000;
+
+    const { width: srcWidth, height: srcHeight } = getVideoDimensions(sourceFile);
+
+    // Build ASS subtitle file for preview.
+    // Use clip-relative timestamps (same as clip generation) so subtitle events
+    // start at PTS ≈ 0 after FFmpeg input-seeking to the clip start.
+    const safeId  = `prev_${Date.now()}`;
+    const assPath = path.join(os.tmpdir(), `${safeId}.ass`);
+    const assContent = await buildAssSubtitles(words, startMs, endMs, captionStyle, undefined);
+    let finalAss = assContent;
+    if (opts.titleOverlay) {
+      // Title: clip-relative duration (buildTitleEvents already produces clip-relative times)
+      const titleResult = buildTitleEvents(opts.titleOverlay, endMs - startMs);
+      if (titleResult) {
+        finalAss = finalAss.replace(/\r?\n\r?\n\[Events\]/, `\n${titleResult.styleLine}\n\n[Events]`);
+        // Title dialogue is already clip-relative — append as-is
+        finalAss += titleResult.dialogueLine + '\n';
+      }
+    }
+    fs.writeFileSync(assPath, finalAss, 'utf-8');
+
+    // assForFfmpeg: path escaped for FFmpeg subtitles filter
+    const assForFfmpeg = assPath
+      .replace(/\\/g, '/')
+      .replace(/^([A-Za-z]):/, '$1\\:');
+
+    const outputJpeg = path.join(os.tmpdir(), `${safeId}.jpg`);
+    let ffmpegArgs: string[] = [];
+
+    // FFmpeg seek strategy: input seek (-ss before -i) to clip start resets PTS to ~0.
+    // Then output seek (-ss after -i) advances to the desired frame within the clip.
+    // This keeps PTS aligned with clip-relative ASS subtitle timestamps.
+
+    try {
+      let cropFrames: CropFrame[] = [];
+      if (zoomEnabled) {
+        try {
+          if (trackingMode === 'speaker') {
+            cropFrames = await this._detectActiveSpeaker(sourceFile, startMs, endMs, subjectBbox);
+          } else if (trackingMode === 'auto') {
+            const tracker = new Tracker();
+            cropFrames = await tracker.detectFaces(sourceFile, startMs, endMs, undefined, srcWidth, srcHeight);
+          } else {
+            cropFrames = await this._detectFaces(sourceFile, startMs, endMs, trackingMode, subjectBbox, subjectSeedMs);
+          }
+        } catch { /* fallback center crop */ }
+      }
+      const letterboxCropMode = layoutPreset === 'letterbox' ? (letterboxBg?.crop ?? 'original') : '9:16';
+      const targetAR: '9:16' | '1:1' | '4:3' = letterboxCropMode === '1:1' ? '1:1' : letterboxCropMode === '4:3' ? '4:3' : '9:16';
+      const cropFilter = buildCropFilter(cropFrames, startMs, endMs, srcWidth, srcHeight, targetAR);
+
+      if (layoutPreset === 'split') {
+        const logo = logoOverlay && fs.existsSync(logoOverlay.filePath) ? logoOverlay : undefined;
+        const raw = buildSplitFilterComplex(splitLayout, [], assPath, srcWidth, srcHeight, logo, []);
+        const lastIdx = raw.lastIndexOf('[vout]');
+        const filterComplex = raw.slice(0, lastIdx) + '[voutRaw]' + raw.slice(lastIdx + 6)
+          + ';[voutRaw]scale=540:960[vout]';
+        ffmpegArgs = [
+          '-ss', String(startSec),
+          '-i', sourceFile,
+          ...(logo ? ['-i', logo.filePath] : []),
+          '-ss', String(frameOffsetSec),
+          '-filter_complex', filterComplex,
+          '-map', '[vout]',
+          '-vframes', '1', '-q:v', '3', outputJpeg,
+        ];
+
+      } else if (layoutPreset === 'game') {
+        const logo = logoOverlay && fs.existsSync(logoOverlay.filePath) ? logoOverlay : undefined;
+        const raw = buildGameFilterComplex([], assPath, srcWidth, srcHeight, gameRatio, gamePosition, logo);
+        const lastIdx = raw.lastIndexOf('[vout]');
+        const filterComplex = raw.slice(0, lastIdx) + '[voutRaw]' + raw.slice(lastIdx + 6)
+          + ';[voutRaw]scale=540:960[vout]';
+        ffmpegArgs = [
+          '-ss', String(startSec),
+          '-i', sourceFile,
+          ...(logo ? ['-i', logo.filePath] : []),
+          '-ss', String(frameOffsetSec),
+          '-filter_complex', filterComplex,
+          '-map', '[vout]',
+          '-vframes', '1', '-q:v', '3', outputJpeg,
+        ];
+
+      } else if (layoutPreset === 'letterbox') {
+        const lbBg: LetterboxBackground = letterboxBg ?? { type: 'blur' };
+        const logo = logoOverlay && fs.existsSync(logoOverlay.filePath)
+          ? logoOverlay : undefined;
+        const { filterComplex: rawFc, needsImageInput } = buildLetterboxFilter(assForFfmpeg, lbBg, logo, zoomEnabled ? cropFilter : undefined);
+        const imageInput = needsImageInput && lbBg.imagePath && fs.existsSync(lbBg.imagePath)
+          ? ['-i', lbBg.imagePath] : [];
+        const logoInput = logo ? ['-i', logo.filePath] : [];
+        const baseFc = (needsImageInput && imageInput.length === 0)
+          ? buildLetterboxFilter(assForFfmpeg, { ...lbBg, type: 'blur' }, logo, zoomEnabled ? cropFilter : undefined).filterComplex
+          : rawFc;
+        const filterComplex = baseFc.replace('[vout]', '[voutRaw]') + ';[voutRaw]scale=540:960[vout]';
+        ffmpegArgs = [
+          '-ss', String(startSec),
+          '-i', sourceFile,
+          ...imageInput,
+          ...logoInput,
+          '-ss', String(frameOffsetSec),
+          '-filter_complex', filterComplex,
+          '-map', '[vout]',
+          '-vframes', '1', '-q:v', '3', outputJpeg,
+        ];
+
+      } else {
+        if (logoOverlay && fs.existsSync(logoOverlay.filePath)) {
+          const baseVf = `${cropFilter},subtitles=${getAssEsc(assForFfmpeg)}`;
+          const rawFc = buildLogoFilterComplex(baseVf, logoOverlay);
+          const filterComplex = rawFc.replace('[vout]', '[voutRaw]') + ';[voutRaw]scale=540:960[vout]';
+          ffmpegArgs = [
+            '-ss', String(startSec),
+            '-i', sourceFile,
+            '-i', logoOverlay.filePath,
+            '-ss', String(frameOffsetSec),
+            '-filter_complex', filterComplex,
+            '-map', '[vout]',
+            '-vframes', '1', '-q:v', '3', outputJpeg,
+          ];
+        } else {
+          const vf = `${cropFilter},subtitles=${getAssEsc(assForFfmpeg)},scale=540:960`;
+          ffmpegArgs = [
+            '-ss', String(startSec),
+            '-i', sourceFile,
+            '-ss', String(frameOffsetSec),
+            '-vf', vf,
+            '-vframes', '1', '-q:v', '3', outputJpeg,
+          ];
+        }
+      }
+
+      await runProcess('ffmpeg', ['-y', ...ffmpegArgs]);
+
+      if (!fs.existsSync(outputJpeg)) return null;
+      const data = fs.readFileSync(outputJpeg);
+      return `data:image/jpeg;base64,${data.toString('base64')}`;
+    } catch (err) {
+      log.warn({ err }, 'renderPreviewFrame failed');
+      if (ffmpegArgs.length > 0) {
+        log.warn({ cmd: ['ffmpeg', '-y', ...ffmpegArgs].join(' ') }, 'renderPreviewFrame ffmpeg cmd');
+      }
+
+      // Retry with first frame of clip (in case seek overshot for short clips)
+      if (frameOffsetSec > 0 && ffmpegArgs.length > 0) {
+        try {
+          // Replace the output -ss value (second occurrence) to 0 to get the first frame
+          const retryArgs = [...ffmpegArgs];
+          // Find the second -ss (output seek) and set it to 0
+          let ssCount = 0;
+          for (let i = 0; i < retryArgs.length; i++) {
+            if (retryArgs[i] === '-ss') {
+              ssCount++;
+              if (ssCount === 2) { retryArgs[i + 1] = '0'; break; }
+            }
+          }
+          await runProcess('ffmpeg', ['-y', ...retryArgs]);
+          if (fs.existsSync(outputJpeg)) {
+            const data = fs.readFileSync(outputJpeg);
+            return `data:image/jpeg;base64,${data.toString('base64')}`;
+          }
+        } catch (retryErr) {
+          log.warn({ retryErr }, 'renderPreviewFrame retry also failed');
+        }
+      }
+      return null;
+    } finally {
+      try { fs.unlinkSync(assPath);    } catch { /* ignore */ }
+      try { fs.unlinkSync(outputJpeg); } catch { /* ignore */ }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Private — audio treatment (mute / replace original audio)
   // ---------------------------------------------------------------------------
 
@@ -1483,15 +2209,21 @@ export class Processor {
       }
       const vol = Math.max(0, Math.min(1, Number.isFinite(musicVolume) ? musicVolume : 0.8));
       log.info({ clipId, replacementAudioPath, vol }, 'Replacing original audio with music track');
+      
+      const isMixedAudio = path.basename(replacementAudioPath).startsWith('mixed-audio-');
+      const loopArgs = isMixedAudio ? [] : ['-stream_loop', '-1'];
+      const shortestArgs = isMixedAudio ? [] : ['-shortest'];
+
       await runProcess('ffmpeg', [
         '-y',
         '-i', outputPath,
-        '-stream_loop', '-1', '-i', replacementAudioPath,
+        ...loopArgs,
+        '-i', replacementAudioPath,
         '-map', '0:v:0', '-map', '1:a:0',
         '-c:v', 'copy',
         '-c:a', 'aac', '-b:a', '320k',
         '-af', `volume=${vol.toFixed(3)}`,
-        '-shortest',
+        ...shortestArgs,
         '-movflags', '+faststart',
         tmpOut,
       ]);
@@ -1515,46 +2247,55 @@ export class Processor {
    * 2. Use concat filter to join intro + clip with re-encode
    * 3. Replace original output
    */
-  private async _prependThumbnail(
+  async prependThumbnail(
     clipId: string,
-    clipOutputPath: string,
+    inputVideoPath: string,
+    outputVideoPath: string,
     thumbnailImagePath: string,
   ): Promise<void> {
-    const tmpDir = os.tmpdir();
-    const finalPath = path.join(tmpDir, `final-${clipId}.mp4`);
-
     try {
-      // Use concat filter: input 0 = thumbnail image (looped 1s), input 1 = clip video
-      // This re-encodes but guarantees correct timing regardless of fps mismatch
+      const hasAudio = hasAudioStream(inputVideoPath);
+      log.info({ clipId, hasAudio }, 'Checking audio stream for thumbnail prepend');
+
+      let filterComplex = '';
+      let mapArgs: string[] = [];
+
+      if (hasAudio) {
+        filterComplex =
+          '[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p,setpts=PTS-STARTPTS,setsar=1[intro];' +
+          '[1:v]fps=30,format=yuv420p,setpts=PTS-STARTPTS,setsar=1[clip];' +
+          'anullsrc=r=44100:cl=stereo[silence];' +
+          '[silence]atrim=0:0.1,asetpts=PTS-STARTPTS[asilence];' +
+          '[intro][asilence][clip][1:a]concat=n=2:v=1:a=1[vout][aout]';
+        mapArgs = ['-map', '[vout]', '-map', '[aout]', '-c:a', 'aac', '-b:a', '320k'];
+      } else {
+        filterComplex =
+          '[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p,setpts=PTS-STARTPTS,setsar=1[intro];' +
+          '[1:v]fps=30,format=yuv420p,setpts=PTS-STARTPTS,setsar=1[clip];' +
+          '[intro][clip]concat=n=2:v=1:a=0[vout]';
+        mapArgs = ['-map', '[vout]', '-an'];
+      }
+
       await runProcess('ffmpeg', [
         '-y',
-        // Input 0: thumbnail image looped for 1 second
+        // Input 0: thumbnail image looped for 0.1 seconds
+        '-framerate', '30',
         '-loop', '1',
-        '-t', '1',
+        '-t', '0.1',
         '-i', thumbnailImagePath,
         // Input 1: the clip video
-        '-i', clipOutputPath,
-        // Filter: scale thumbnail to 1080x1920, concat video+audio streams
-        '-filter_complex',
-        '[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,setsar=1[intro];' +
-        '[1:v]fps=30,format=yuv420p,setsar=1[clip];' +
-        'anullsrc=r=44100:cl=stereo[silence];' +
-        '[silence]atrim=0:1[asilence];' +
-        '[intro][asilence][clip][1:a]concat=n=2:v=1:a=1[vout][aout]',
-        '-map', '[vout]',
-        '-map', '[aout]',
-        '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
-        '-c:a', 'aac', '-b:a', '320k',
+        '-i', inputVideoPath,
+        '-filter_complex', filterComplex,
+        ...mapArgs,
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '15',
         '-movflags', '+faststart',
-        finalPath,
+        outputVideoPath,
       ]);
 
-      // Replace original output with concatenated result
-      fs.copyFileSync(finalPath, clipOutputPath);
-
       log.info({ clipId, thumbnailImagePath }, 'Thumbnail prepended successfully');
-    } finally {
-      try { fs.unlinkSync(finalPath); } catch { /* ignore */ }
+    } catch (err) {
+      log.error({ clipId, err }, 'Failed to prepend thumbnail');
+      throw err;
     }
   }
 
@@ -1780,4 +2521,886 @@ export class Processor {
       return [];
     }
   }
+
+  /**
+   * Returns exact duration of a video file in milliseconds using ffprobe.
+   */
+  async getVideoDurationMs(videoPath: string): Promise<number> {
+    return new Promise((resolve) => {
+      const args = [
+        '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        videoPath,
+      ];
+      execFile('ffprobe', args, (err: Error | null, stdout: string) => {
+        if (err || !stdout.trim()) {
+          resolve(60_000); // Default 60s fallback
+          return;
+        }
+        const sec = parseFloat(stdout.trim());
+        resolve(isNaN(sec) ? 60_000 : Math.round(sec * 1000));
+      });
+    });
+  }
+
+  /**
+   * Render commentary video by combining original video, commentary audio track (with volume ducking),
+   * and burning styled subtitles based on selected preset.
+   */
+  async renderCommentaryVideo(opts: {
+    sourceVideoPath: string;
+    ttsAudioPath: string;
+    words: TranscriptWord[];
+    outputPath: string;
+    presetId?: CaptionPresetId;
+    captionStyle?: CaptionStyle;
+    duckingVolume?: number;
+    durationMs: number;
+    commentaryMode?: 'full' | 'hook_only' | 'hook_replay_outro';
+    transitionEffect?: CommentatorTransitionEffect;
+    transitionSfx?: string;
+    bgMusicPath?: string;
+    bgMusicVolume?: number;
+    clipId?: string;
+    sourceFile?: string;
+    startMs?: number;
+    endMs?: number;
+    optionsJson?: string;
+    reactionTtsPath?: string;
+    reactionWords?: TranscriptWord[];
+    takeawayTtsPath?: string;
+    takeawayWords?: TranscriptWord[];
+    customThumbnailPath?: string;
+    brandingLogoPath?: string;
+    originalTranscriptWords?: TranscriptWord[];
+    avatarVideoPath?: string;
+    avatarConfig?: AvatarConfig;
+  }): Promise<void> {
+    if (opts.commentaryMode === 'hook_only' || opts.commentaryMode === 'hook_replay_outro') {
+      await this._renderHookOnlyCommentaryVideo(opts);
+      if (opts.avatarVideoPath) {
+        await this.overlayAvatarVideo(opts.outputPath, opts.avatarVideoPath, opts.avatarConfig);
+      }
+      return;
+    }
+
+    const {
+      sourceVideoPath,
+      ttsAudioPath,
+      words,
+      outputPath,
+      presetId = 'tiktok',
+      duckingVolume = 0.15,
+      durationMs,
+      sourceFile,
+      startMs,
+      endMs,
+      optionsJson,
+    } = opts;
+
+    log.info({ sourceVideoPath, ttsAudioPath, presetId, duckingVolume }, 'Rendering final commentary video with ASS subtitles and audio mixing');
+
+    let inputVideoPath = sourceVideoPath;
+    let tmpCleanVideoPath: string | null = null;
+
+    // If raw source file & timestamps exist, render a 100% clean video segment without original subtitles
+    if (sourceFile && fs.existsSync(sourceFile) && startMs !== undefined && endMs !== undefined) {
+      try {
+        log.info({ sourceFile, startMs, endMs }, 'Rendering clean video segment without original subtitles for commentary');
+        tmpCleanVideoPath = path.join(os.tmpdir(), `clean_commentary_${Date.now()}.mp4`);
+        let parsedOpts: any = {};
+        if (optionsJson) {
+          try { parsedOpts = JSON.parse(optionsJson); } catch {}
+        }
+
+        await this.process({
+          clipId: opts.clipId || 'clean',
+          projectId: 'clean',
+          sourceFile,
+          startMs,
+          endMs,
+          outputPath: tmpCleanVideoPath,
+          subtitleStyle: 'none',
+          subtitlePosition: 'lower-third',
+          zoomEnabled: parsedOpts.zoomEnabled ?? true,
+          trackingMode: parsedOpts.trackingMode ?? 'auto',
+          layoutPreset: parsedOpts.layoutPreset,
+          splitLayout: parsedOpts.splitLayout,
+          gameRatio: parsedOpts.gameRatio,
+          gamePosition: parsedOpts.gamePosition,
+          letterboxBg: parsedOpts.letterboxBg,
+          logoOverlay: parsedOpts.logoOverlay,
+          words: [],
+          captionStyle: { ...CAPTION_PRESETS['none'], presetId: 'none' },
+        });
+
+        if (fs.existsSync(tmpCleanVideoPath)) {
+          inputVideoPath = tmpCleanVideoPath;
+        }
+      } catch (cleanErr) {
+        log.warn({ cleanErr }, 'Failed to render clean video segment, falling back to sourceVideoPath');
+      }
+    }
+
+    // 1. Build ASS Subtitle Content for Commentary
+    const presetKey = (presetId as CaptionPresetId) in CAPTION_PRESETS ? (presetId as CaptionPresetId) : 'tiktok';
+    const resolvedCaption: CaptionStyle = opts.captionStyle ?? {
+      presetId: presetKey,
+      ...CAPTION_PRESETS[presetKey],
+    };
+
+    const assContent = await buildAssSubtitles(words, 0, durationMs, resolvedCaption, inputVideoPath);
+
+    // Inject title overlay if configured in optionsJson
+    let titleOverlay = (opts as any).titleOverlay;
+    if (!titleOverlay && optionsJson) {
+      try {
+        const parsed = JSON.parse(optionsJson);
+        if (parsed?.titleOverlay) titleOverlay = parsed.titleOverlay;
+      } catch {}
+    }
+
+    let finalAss = assContent;
+    if (titleOverlay) {
+      const titleResult = buildTitleEvents(titleOverlay, durationMs);
+      if (titleResult) {
+        finalAss = finalAss.replace(
+          /\r?\n\r?\n\[Events\]/,
+          `\n${titleResult.styleLine}\n\n[Events]`
+        );
+        finalAss += titleResult.dialogueLine + '\n';
+      }
+    }
+
+    const tmpAssPath = path.join(os.tmpdir(), `commentary-sub-${Date.now()}.ass`);
+    fs.writeFileSync(tmpAssPath, finalAss, 'utf-8');
+
+    // Escape ASS file path for FFmpeg subtitles filter on Windows
+    const escapedAssPath = tmpAssPath.replace(/\\/g, '/').replace(/:/g, '\\:');
+
+    // Robust fonts directory resolution across dev environment & production Electron build (win-unpacked)
+    const possibleFontDirs = [
+      path.join(process.cwd(), 'resources', 'fonts'),
+      path.join(__dirname, '..', '..', 'resources', 'fonts'),
+      path.join(__dirname, '..', 'resources', 'fonts'),
+      path.join((process as any).resourcesPath || '', 'fonts'),
+      path.join((process as any).resourcesPath || '', 'resources', 'fonts'),
+      'resources/fonts',
+    ];
+    let resolvedFontsDir = '';
+    for (const d of possibleFontDirs) {
+      if (d && fs.existsSync(d)) {
+        resolvedFontsDir = d;
+        break;
+      }
+    }
+
+    const escapedFontsDir = resolvedFontsDir
+      ? resolvedFontsDir.replace(/\\/g, '/').replace(/:/g, '\\:')
+      : '';
+
+    const subtitlesFilter = escapedFontsDir
+      ? `subtitles='${escapedAssPath}':fontsdir='${escapedFontsDir}'`
+      : `subtitles='${escapedAssPath}'`;
+
+    // 2. FFmpeg Command Arguments — Radio Broadcaster Dynamic Sidechain Ducking with Stream Splitting
+    // Calculate compression ratio for dynamic sidechain ducking (e.g. duckingVolume 0.20 -> ratio 5.0)
+    const ratio = Math.max(2, Math.min(20, Math.round((1 / Math.max(0.05, duckingVolume)) * 10) / 10));
+
+    const filterComplex = `[0:v]${subtitlesFilter}[vout];[1:a]volume=1.2,apad,asplit=2[tts_sc][tts_mix];[0:a][tts_sc]sidechaincompress=threshold=0.015:ratio=${ratio}:attack=15:release=350:knee=2.8[bg_ducked];[bg_ducked][tts_mix]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0[aout]`;
+
+    const args = [
+      '-y',
+      '-i', inputVideoPath,
+      '-i', ttsAudioPath,
+      '-filter_complex', filterComplex,
+      '-map', '[vout]',
+      '-map', '[aout]',
+      '-c:v', 'libx264',
+      '-crf', '17',
+      '-preset', 'medium',
+      '-threads', '4',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-ar', '48000',
+      '-ac', '2',
+      outputPath,
+    ];
+
+    try {
+      await runProcess('ffmpeg', args);
+      log.info({ outputPath }, 'Commentary video rendering complete');
+      if (opts.avatarVideoPath) {
+        await this.overlayAvatarVideo(outputPath, opts.avatarVideoPath, opts.avatarConfig);
+      }
+    } finally {
+      try { fs.unlinkSync(tmpAssPath); } catch { /* ignore */ }
+      if (tmpCleanVideoPath) {
+        try { fs.unlinkSync(tmpCleanVideoPath); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  private async _renderHookOnlyCommentaryVideo(opts: {
+    sourceVideoPath: string;
+    ttsAudioPath: string;
+    words: TranscriptWord[];
+    outputPath: string;
+    presetId?: CaptionPresetId;
+    captionStyle?: CaptionStyle;
+    duckingVolume?: number;
+    durationMs: number;
+    commentaryMode?: 'full' | 'hook_only' | 'hook_replay_outro';
+    transitionEffect?: CommentatorTransitionEffect;
+    transitionSfx?: string;
+    bgMusicPath?: string;
+    bgMusicVolume?: number;
+    clipId?: string;
+    sourceFile?: string;
+    startMs?: number;
+    endMs?: number;
+    optionsJson?: string;
+    reactionTtsPath?: string;
+    reactionWords?: TranscriptWord[];
+    takeawayTtsPath?: string;
+    takeawayWords?: TranscriptWord[];
+    customThumbnailPath?: string;
+    brandingLogoPath?: string;
+    originalTranscriptWords?: TranscriptWord[];
+  }): Promise<void> {
+    const {
+      sourceVideoPath,
+      ttsAudioPath,
+      words,
+      outputPath,
+      presetId = 'tiktok',
+      durationMs,
+      sourceFile,
+      startMs = 0,
+      endMs = durationMs,
+      optionsJson,
+      bgMusicPath,
+      bgMusicVolume = 0.20,
+    } = opts;
+
+    log.info({ sourceVideoPath, ttsAudioPath, bgMusicPath, bgMusicVolume }, 'Rendering Dynamic Hook Commentary Video + Raw Replay Segment');
+
+    // Dynamically calculate exact TTS voiceover audio duration for Hook Segment A
+    let hookAudioDurationMs = 3000;
+    try {
+      if (fs.existsSync(ttsAudioPath)) {
+        hookAudioDurationMs = await this.getVideoDurationMs(ttsAudioPath);
+      }
+    } catch (durErr) {
+      log.warn({ durErr }, 'Failed to measure ttsAudioPath duration, fallback to 3000ms');
+    }
+    // Add 650ms padding (250ms natural tail + 400ms transition buffer) so dubber finishes BEFORE xfade starts
+    const hookDurationMs = Math.max(2000, Math.ceil(hookAudioDurationMs) + 650);
+    log.info({ hookAudioDurationMs, hookDurationMs }, 'Calculated dynamic hook intro segment duration');
+
+    const tmpDir = os.tmpdir();
+    const segAPath = path.join(tmpDir, `hook_segA_${Date.now()}.mp4`);
+    const segBPath = path.join(tmpDir, `hook_segB_${Date.now()}.mp4`);
+
+    let parsedOpts: any = {};
+    if (optionsJson) {
+      try { parsedOpts = JSON.parse(optionsJson); } catch {}
+    }
+
+    const rawVideoFile = (sourceFile && fs.existsSync(sourceFile)) ? sourceFile : sourceVideoPath;
+    const isUsingRawFile = rawVideoFile === sourceFile;
+
+    // -------------------------------------------------------------------------
+    // 1. Render Segment A (0s – 3.0s Hook Intro)
+    // -------------------------------------------------------------------------
+    const tmpCleanIntroPath = path.join(tmpDir, `clean_intro_${Date.now()}.mp4`);
+    if (isUsingRawFile) {
+      await this.process({
+        clipId: opts.clipId || 'hook_intro',
+        projectId: 'clean',
+        sourceFile: rawVideoFile,
+        startMs,
+        endMs: startMs + hookDurationMs,
+        outputPath: tmpCleanIntroPath,
+        subtitleStyle: 'none',
+        subtitlePosition: 'lower-third',
+        zoomEnabled: parsedOpts.zoomEnabled ?? true,
+        trackingMode: parsedOpts.trackingMode ?? 'auto',
+        layoutPreset: parsedOpts.layoutPreset,
+        splitLayout: parsedOpts.splitLayout,
+        gameRatio: parsedOpts.gameRatio,
+        gamePosition: parsedOpts.gamePosition,
+        letterboxBg: parsedOpts.letterboxBg,
+        logoOverlay: parsedOpts.logoOverlay,
+        words: [],
+        captionStyle: { ...CAPTION_PRESETS['none'], presetId: 'none' },
+      });
+    }
+
+    const introInputPath = fs.existsSync(tmpCleanIntroPath) ? tmpCleanIntroPath : sourceVideoPath;
+
+    // Build ASS Subtitles for 3s Hook Phrase
+    const presetKey = (presetId as CaptionPresetId) in CAPTION_PRESETS ? (presetId as CaptionPresetId) : 'tiktok';
+    const resolvedCaption: CaptionStyle = opts.captionStyle ?? {
+      presetId: presetKey,
+      ...CAPTION_PRESETS[presetKey],
+    };
+
+    // Use ttsAudioPath (not introInputPath) for loudness detection — shake effect
+    // must analyse the TTS voice audio since `words` timestamps are TTS-relative.
+    const assContent = await buildAssSubtitles(words, 0, hookDurationMs, resolvedCaption, ttsAudioPath);
+    let titleOverlay = (opts as any).titleOverlay;
+    if (!titleOverlay && optionsJson) {
+      try {
+        const parsed = JSON.parse(optionsJson);
+        if (parsed?.titleOverlay) titleOverlay = parsed.titleOverlay;
+      } catch {}
+    }
+
+    let finalAss = assContent;
+    if (titleOverlay) {
+      const titleResult = buildTitleEvents(titleOverlay, hookDurationMs);
+      if (titleResult) {
+        finalAss = finalAss.replace(/\r?\n\r?\n\[Events\]/, `\n${titleResult.styleLine}\n\n[Events]`);
+        finalAss += titleResult.dialogueLine + '\n';
+      }
+    }
+
+    const tmpAssPathA = path.join(tmpDir, `hook-sub-${Date.now()}.ass`);
+    fs.writeFileSync(tmpAssPathA, finalAss, 'utf-8');
+
+    const escapedAssPathA = tmpAssPathA.replace(/\\/g, '/').replace(/:/g, '\\:');
+    const possibleFontDirs = [
+      path.join(process.cwd(), 'resources', 'fonts'),
+      path.join(__dirname, '..', '..', 'resources', 'fonts'),
+      path.join(__dirname, '..', 'resources', 'fonts'),
+      path.join((process as any).resourcesPath || '', 'fonts'),
+      path.join((process as any).resourcesPath || '', 'resources', 'fonts'),
+      'resources/fonts',
+    ];
+    let resolvedFontsDir = '';
+    for (const d of possibleFontDirs) {
+      if (d && fs.existsSync(d)) {
+        resolvedFontsDir = d;
+        break;
+      }
+    }
+
+    const escapedFontsDir = resolvedFontsDir
+      ? resolvedFontsDir.replace(/\\/g, '/').replace(/:/g, '\\:')
+      : '';
+    const subtitlesFilterA = escapedFontsDir
+      ? `subtitles='${escapedAssPathA}':fontsdir='${escapedFontsDir}'`
+      : `subtitles='${escapedAssPathA}'`;
+
+    // Audio setup for Segment A: TTS (volume 1.0) + optional BGM (Mute original video audio)
+    const hasBgm = bgMusicPath && fs.existsSync(bgMusicPath);
+    let filterComplexA = '';
+    const argsA: string[] = ['-y', '-i', introInputPath, '-i', ttsAudioPath];
+
+    if (hasBgm) {
+      argsA.push('-i', bgMusicPath!);
+      const fadeStartSec = Math.max(0, (hookDurationMs - 250) / 1000);
+      filterComplexA = `[0:v]${subtitlesFilterA}[vout];[1:a]volume=1.2,apad[tts];[2:a]volume=${bgMusicVolume},afade=t=out:st=${fadeStartSec}:d=0.25[bgm];[tts][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`;
+    } else {
+      filterComplexA = `[0:v]${subtitlesFilterA}[vout];[1:a]volume=1.2,apad[aout]`;
+    }
+
+    argsA.push(
+      '-filter_complex', filterComplexA,
+      '-map', '[vout]',
+      '-map', '[aout]',
+      '-t', String(hookDurationMs / 1000),
+      '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+      '-pix_fmt', 'yuv420p', '-s', '1080x1920',
+      '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+      segAPath
+    );
+
+    emitCommentaryProgress(89, 'Rendering Segment A hook intro...');
+    await runProcess('ffmpeg', argsA);
+
+    // -------------------------------------------------------------------------
+    // 2. Render Segment B (Replay Clip with Original Conversation Subtitles & Audio)
+    // -------------------------------------------------------------------------
+    emitCommentaryProgress(90, 'Rendering Segment B video replay...');
+    const origWords: TranscriptWord[] = opts.originalTranscriptWords && opts.originalTranscriptWords.length > 0
+      ? opts.originalTranscriptWords
+      : (parsedOpts.words || []);
+    const rawSegBWords = origWords.length > 0
+      ? origWords
+      : (opts.reactionWords && opts.reactionWords.length > 0 ? opts.reactionWords : (opts.words || []));
+    const segBRawPath = path.join(tmpDir, `hook_segB_raw_${Date.now()}.mp4`);
+
+    const inputSource = (sourceFile && fs.existsSync(sourceFile)) ? sourceFile : sourceVideoPath;
+    const processStartMs = inputSource === sourceFile ? startMs : 0;
+    // Add 500ms buffer so Segment B audio/video doesn't get cut by xfade transition
+    const processEndMs = (inputSource === sourceFile ? endMs : (endMs - startMs)) + 500;
+
+    // Normalize segBWords timestamps so w.startMs and w.endMs align with processStartMs and processEndMs
+    let normalizedWords: TranscriptWord[] = [];
+    if (rawSegBWords.length > 0) {
+      const firstStart = rawSegBWords[0].startMs;
+      if (inputSource === sourceFile && firstStart < startMs) {
+        // Words are clip-relative (0..duration), shift them to full video timeline (startMs..endMs)
+        normalizedWords = rawSegBWords.map((w) => ({
+          ...w,
+          startMs: w.startMs + startMs,
+          endMs: w.endMs + startMs,
+        }));
+      } else if (inputSource !== sourceFile && firstStart >= startMs && startMs > 0) {
+        // Words are full-video relative, shift them to clip-relative timeline (0..duration)
+        normalizedWords = rawSegBWords.map((w) => ({
+          ...w,
+          startMs: Math.max(0, w.startMs - startMs),
+          endMs: Math.max(0, w.endMs - startMs),
+        }));
+      } else {
+        normalizedWords = rawSegBWords;
+      }
+    }
+
+    log.info({ inputSource, processStartMs, processEndMs, wordCount: normalizedWords.length }, 'Rendering Segment B with normalized subtitles');
+
+    await this.process({
+      clipId: opts.clipId || 'hook_replay',
+      projectId: 'replay',
+      sourceFile: inputSource,
+      startMs: processStartMs,
+      endMs: processEndMs,
+      outputPath: segBRawPath,
+      subtitleStyle: parsedOpts.subtitleStyle || 'bold-white',
+      subtitlePosition: parsedOpts.subtitlePosition || 'lower-third',
+      zoomEnabled: parsedOpts.zoomEnabled ?? true,
+      trackingMode: parsedOpts.trackingMode ?? 'auto',
+      layoutPreset: parsedOpts.layoutPreset,
+      splitLayout: parsedOpts.splitLayout,
+      gameRatio: parsedOpts.gameRatio,
+      gamePosition: parsedOpts.gamePosition,
+      letterboxBg: parsedOpts.letterboxBg,
+      logoOverlay: parsedOpts.logoOverlay,
+      titleOverlay: parsedOpts.titleOverlay,
+      words: normalizedWords,
+      captionStyle: resolvedCaption,
+    });
+
+    // -------------------------------------------------------------------------
+    // 2b. Post-process Segment B: Radio Broadcaster Dynamic Audio Ducking & Watermark
+    // -------------------------------------------------------------------------
+    const reactionTts = opts.reactionTtsPath;
+    const hasReaction = reactionTts && fs.existsSync(reactionTts);
+    const brandingLogo = opts.brandingLogoPath;
+    const hasBranding = brandingLogo && fs.existsSync(brandingLogo);
+
+    if (hasReaction || hasBranding) {
+      emitCommentaryProgress(93, 'Post-processing Segment B audio ducking...');
+      log.info({ hasReaction, hasBranding }, 'Post-processing Segment B with Radio Broadcaster ducking and/or branding');
+
+      const argsB: string[] = ['-y', '-i', segBRawPath];
+      let inputIdx = 1;
+      const reactionIdx = hasReaction ? inputIdx++ : -1;
+      const brandingIdx = hasBranding ? inputIdx++ : -1;
+
+      if (hasReaction) argsB.push('-i', reactionTts!);
+      if (hasBranding) argsB.push('-i', brandingLogo!);
+
+      // Build filter_complex
+      const filterParts: string[] = [];
+      if (hasBranding) {
+        filterParts.push(`[${brandingIdx}:v]format=rgba,colorchannelmixer=aa=0.35,scale=120:-1[wm];[0:v][wm]overlay=W-w-20:H-h-20[vout]`);
+      }
+      if (hasReaction) {
+        // Dynamic sidechain ducking: when AI dubbing speaks, video audio ducks; when silent, video audio swells to 100%
+        // TTS must be asplit into 2 streams: one for sidechain key signal, one for final mix
+        filterParts.push(`[${reactionIdx}:a]volume=1.2,apad,asplit=2[tts_sc][tts_mix];[0:a][tts_sc]sidechaincompress=threshold=0.08:ratio=8:attack=15:release=250[ducked];[ducked][tts_mix]amix=inputs=2:duration=first:dropout_transition=0[aout]`);
+      }
+
+      const filterComplex = filterParts.join(';');
+      argsB.push('-filter_complex', filterComplex);
+
+      if (hasBranding) {
+        argsB.push('-map', '[vout]');
+      } else {
+        argsB.push('-map', '0:v');
+      }
+
+      if (hasReaction) {
+        argsB.push('-map', '[aout]');
+      } else {
+        argsB.push('-map', '0:a');
+      }
+
+      argsB.push(
+        '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+        '-pix_fmt', 'yuv420p', '-s', '1080x1920',
+        '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+        segBPath
+      );
+
+      try {
+        await runProcess('ffmpeg', argsB);
+        log.info('Segment B post-processed with reaction commentary and/or branding');
+      } catch (postErr) {
+        log.warn({ postErr }, 'Segment B post-processing failed, re-encoding raw Segment B');
+        try {
+          await runProcess('ffmpeg', [
+            '-y', '-i', segBRawPath,
+            '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+            '-pix_fmt', 'yuv420p', '-s', '1080x1920',
+            '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+            segBPath,
+          ]);
+        } catch {
+          fs.copyFileSync(segBRawPath, segBPath);
+        }
+      }
+    } else {
+      // Re-encode to ensure consistent yuv420p 1080x1920 48kHz stereo for xfade joining
+      try {
+        await runProcess('ffmpeg', [
+          '-y', '-i', segBRawPath,
+          '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+          '-pix_fmt', 'yuv420p', '-s', '1080x1920',
+          '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+          segBPath,
+        ]);
+      } catch {
+        fs.copyFileSync(segBRawPath, segBPath);
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. Optional Custom Thumbnail Opening Muted Cover Frame (0.4s)
+    // -------------------------------------------------------------------------
+    const customThumb = (opts as any).customThumbnailPath;
+    const hasThumb = customThumb && fs.existsSync(customThumb);
+    const seg0Path = path.join(tmpDir, `hook_seg0_${Date.now()}.mp4`);
+
+    if (hasThumb) {
+      try {
+        await runProcess('ffmpeg', [
+          '-y',
+          '-loop', '1',
+          '-i', customThumb,
+          '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
+          '-t', '0.4',
+          '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p',
+          '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+          '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+          seg0Path,
+        ]);
+      } catch (thumbErr) {
+        log.warn({ thumbErr }, 'Failed to generate custom thumbnail opening frame');
+      }
+    }
+    // -------------------------------------------------------------------------
+    // 2c. Render Segment C (Moral Takeaway / Outro Segment for Mode 3)
+    // -------------------------------------------------------------------------
+    const takeawayTts = opts.takeawayTtsPath || (opts.commentaryMode === 'hook_replay_outro' ? opts.reactionTtsPath : undefined);
+    const hasTakeaway = takeawayTts && fs.existsSync(takeawayTts);
+    const is3SegMode = opts.commentaryMode === 'hook_replay_outro' && hasTakeaway;
+    const segCPath = path.join(tmpDir, `hook_segC_${Date.now()}.mp4`);
+    let tmpAssPathC = '';
+    let hasSegC = false;
+
+    if (is3SegMode) {
+      emitCommentaryProgress(95, 'Rendering Segment C moral takeaway outro...');
+      log.info('Rendering Segment C Educational Moral Takeaway Outro (Replaying Raw Source Video Clip)');
+      let takeawayAudioDurationMs = 3500;
+      try {
+        takeawayAudioDurationMs = await this.getVideoDurationMs(takeawayTts!);
+      } catch {}
+      const takeawayDurMs = Math.max(3000, Math.ceil(takeawayAudioDurationMs) + 300);
+
+      const tmpCleanOutroPath = path.join(tmpDir, `clean_outro_${Date.now()}.mp4`);
+
+      // Replay raw source video clip starting from processStartMs for takeawayDurMs
+      await this.process({
+        clipId: opts.clipId || 'hook_outro',
+        projectId: 'clean',
+        sourceFile: inputSource,
+        startMs: processStartMs,
+        endMs: Math.min(processEndMs, processStartMs + takeawayDurMs),
+        outputPath: tmpCleanOutroPath,
+        subtitleStyle: 'none',
+        subtitlePosition: 'lower-third',
+        zoomEnabled: parsedOpts.zoomEnabled ?? true,
+        trackingMode: parsedOpts.trackingMode ?? 'auto',
+        layoutPreset: parsedOpts.layoutPreset,
+        splitLayout: parsedOpts.splitLayout,
+        gameRatio: parsedOpts.gameRatio,
+        gamePosition: parsedOpts.gamePosition,
+        letterboxBg: parsedOpts.letterboxBg,
+        logoOverlay: parsedOpts.logoOverlay,
+        words: [],
+        captionStyle: { ...CAPTION_PRESETS['none'], presetId: 'none' },
+      });
+
+      const outroInputPath = fs.existsSync(tmpCleanOutroPath) ? tmpCleanOutroPath : sourceVideoPath;
+      const outroWords: TranscriptWord[] = opts.takeawayWords || opts.reactionWords || [];
+      // DO NOT normalize timestamps — STT-aligned words are already correct relative to the TTS audio
+      // timeline (input [1:a] in the FFmpeg filter). Shifting them to 0ms causes subtitles to appear
+      // before the dubber actually speaks (because TTS audio has natural silence at the beginning).
+      log.info({ outroWordCount: outroWords.length, firstWord: outroWords[0] }, 'Using STT-aligned Segment C subtitle words as-is (no normalization)');
+
+      const assContentC = await buildAssSubtitles(outroWords, 0, 999999, resolvedCaption, outroInputPath);
+      tmpAssPathC = path.join(tmpDir, `commentary_subC_${Date.now()}.ass`);
+      fs.writeFileSync(tmpAssPathC, assContentC, 'utf-8');
+
+      const isWin = process.platform === 'win32';
+      const escapedAssC = isWin
+        ? tmpAssPathC.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '$1\\:')
+        : tmpAssPathC;
+      const subtitlesFilterC = escapedFontsDir
+        ? `subtitles='${escapedAssC}':fontsdir='${escapedFontsDir}'`
+        : `subtitles='${escapedAssC}'`;
+
+      let filterComplexC = `[0:v]${subtitlesFilterC}[vout];[1:a]volume=1.2,apad[aout]`;
+      const argsC: string[] = ['-y', '-i', outroInputPath, '-i', takeawayTts!];
+
+      if (hasBgm) {
+        argsC.push('-i', bgMusicPath!);
+        filterComplexC = `[0:v]${subtitlesFilterC}[vout];[1:a]volume=1.2,apad[tts];[2:a]volume=${bgMusicVolume},afade=t=in:st=0:d=0.25[bgm];[tts][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`;
+      }
+
+      argsC.push(
+        '-filter_complex', filterComplexC,
+        '-map', '[vout]',
+        '-map', '[aout]',
+        '-t', String(takeawayDurMs / 1000),
+        '-shortest',
+        '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+        '-pix_fmt', 'yuv420p', '-s', '1080x1920',
+        '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+        segCPath
+      );
+
+      try {
+        await runProcess('ffmpeg', argsC);
+        hasSegC = fs.existsSync(segCPath) && fs.statSync(segCPath).size > 1000;
+        log.info({ segCPath, hasSegC }, 'Successfully rendered Segment C Moral Takeaway Outro with ASS Subtitles & BGM');
+      } catch (segCErr) {
+        log.warn({ segCErr }, 'Failed to render Segment C Outro');
+      }
+    }
+
+    const useSeg0 = hasThumb && fs.existsSync(seg0Path);
+    const transitionEffect = opts.transitionEffect || 'fade';
+
+    // Resolve Transition SFX audio path
+    let sfxFilePath = '';
+    if (opts.transitionSfx && opts.transitionSfx !== 'none') {
+      const sfxName = opts.transitionSfx;
+      const candidates = [
+        sfxName,
+        path.join(process.cwd(), 'resources', 'sfx', `${sfxName}.wav`),
+        path.join(__dirname, '..', '..', 'resources', 'sfx', `${sfxName}.wav`),
+        path.join(__dirname, '..', 'resources', 'sfx', `${sfxName}.wav`),
+        path.join((process as any).resourcesPath || '', 'resources', 'sfx', `${sfxName}.wav`),
+      ];
+      for (const p of candidates) {
+        if (p && fs.existsSync(p)) {
+          sfxFilePath = p;
+          break;
+        }
+      }
+    }
+
+    const hasSfx = !!sfxFilePath && fs.existsSync(sfxFilePath);
+    emitCommentaryProgress(97, 'Joining all segments with transitions...');
+    log.info({ useSeg0, hasSegC, transitionEffect, hasSfx, sfxFilePath, segAPath, segBPath, segCPath }, 'Joining Segments with transition effect and SFX');
+
+    try {
+      if (hasSegC) {
+        let durA_sec = 3.0;
+        let durB_sec = 5.0;
+        let durC_sec = 3.5;
+        try { durA_sec = (await this.getVideoDurationMs(segAPath)) / 1000; } catch {}
+        try { durB_sec = (await this.getVideoDurationMs(segBPath)) / 1000; } catch {}
+        try { durC_sec = (await this.getVideoDurationMs(segCPath)) / 1000; } catch {}
+
+        // Clamp transition duration so it never exceeds 25% of shortest segment
+        const tDur = Math.min(0.35, durA_sec * 0.25, durB_sec * 0.25, durC_sec * 0.25);
+        const offset1 = Math.max(0.1, durA_sec - tDur);
+        // After first xfade, the merged v01 duration = durA + durB - tDur
+        const v01_dur = durA_sec + durB_sec - tDur;
+        const offset2 = Math.max(0.1, v01_dur - tDur);
+        const offset1Ms = Math.round(offset1 * 1000);
+        const offset2Ms = Math.round(offset2 * 1000);
+
+        const inputArgs: string[] = ['-y', '-i', segAPath, '-i', segBPath, '-i', segCPath];
+        let inputIdx = 3;
+        const sfxIdx = (hasSfx && transitionEffect !== 'none') ? inputIdx++ : -1;
+        if (hasSfx && transitionEffect !== 'none') inputArgs.push('-i', sfxFilePath);
+
+        const filterParts: string[] = [];
+        if (transitionEffect !== 'none') {
+          filterParts.push(`[0:v][1:v]xfade=transition=${transitionEffect}:duration=${tDur}:offset=${offset1}[v01]`);
+          filterParts.push(`[v01][2:v]xfade=transition=${transitionEffect}:duration=${tDur}:offset=${offset2}[vout]`);
+
+          filterParts.push(`[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0]`);
+          filterParts.push(`[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1]`);
+          filterParts.push(`[2:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a2]`);
+          filterParts.push(`[a0][a1]acrossfade=d=${tDur}:c1=tri:c2=tri[a01]`);
+          filterParts.push(`[a01][a2]acrossfade=d=${tDur}:c1=tri:c2=tri[aout_raw]`);
+
+          if (hasSfx && sfxIdx >= 0) {
+            filterParts.push(`[${sfxIdx}:a]asplit=2[sfxA][sfxB]`);
+            filterParts.push(`[sfxA]adelay=${offset1Ms}|${offset1Ms},volume=0.85[sfx1]`);
+            filterParts.push(`[sfxB]adelay=${offset2Ms}|${offset2Ms},volume=0.85[sfx2]`);
+            filterParts.push(`[aout_raw][sfx1][sfx2]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[aout]`);
+          } else {
+            filterParts.push(`[aout_raw]anull[aout]`);
+          }
+        } else {
+          filterParts.push('[0:v][0:a][1:v][1:a][2:v][2:a]concat=n=3:v=1:a=1[vout][aout]');
+        }
+
+        inputArgs.push(
+          '-filter_complex', filterParts.join(';'),
+          '-map', '[vout]',
+          '-map', '[aout]',
+          '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+          '-c:a', 'aac', '-b:a', '320k',
+          outputPath
+        );
+        const totalJoinDur = durA_sec + durB_sec + durC_sec - 2 * tDur;
+        await runProcessWithRealtimeProgress(inputArgs, totalJoinDur, 97, 99);
+      } else {
+        let durA_sec = 3.0;
+        let durB_sec = 5.0;
+        try { durA_sec = (await this.getVideoDurationMs(segAPath)) / 1000; } catch {}
+        try { durB_sec = (await this.getVideoDurationMs(segBPath)) / 1000; } catch {}
+        const tDur2 = Math.min(0.35, durA_sec * 0.25, durB_sec * 0.25);
+        const offset1 = Math.max(0.1, durA_sec - tDur2);
+        const offset1Ms = Math.round(offset1 * 1000);
+
+        const inputArgs: string[] = ['-y', '-i', segAPath, '-i', segBPath];
+        let inputIdx = 2;
+        const sfxIdx = (hasSfx && transitionEffect !== 'none') ? inputIdx++ : -1;
+        if (hasSfx && transitionEffect !== 'none') inputArgs.push('-i', sfxFilePath);
+
+        const filterParts: string[] = [];
+        if (transitionEffect !== 'none') {
+          filterParts.push(`[0:v][1:v]xfade=transition=${transitionEffect}:duration=${tDur2}:offset=${offset1}[vout]`);
+
+          filterParts.push(`[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0]`);
+          filterParts.push(`[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1]`);
+          filterParts.push(`[a0][a1]acrossfade=d=${tDur2}:c1=tri:c2=tri[aout_raw]`);
+
+          if (hasSfx && sfxIdx >= 0) {
+            filterParts.push(`[${sfxIdx}:a]adelay=${offset1Ms}|${offset1Ms},volume=0.85[sfx1]`);
+            filterParts.push(`[aout_raw][sfx1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`);
+          } else {
+            filterParts.push(`[aout_raw]anull[aout]`);
+          }
+        } else {
+          filterParts.push('[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[vout][aout]');
+        }
+
+        inputArgs.push(
+          '-filter_complex', filterParts.join(';'),
+          '-map', '[vout]',
+          '-map', '[aout]',
+          '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+          '-c:a', 'aac', '-b:a', '320k',
+          outputPath
+        );
+        const totalJoinDur2 = durA_sec + durB_sec - tDur2;
+        await runProcessWithRealtimeProgress(inputArgs, totalJoinDur2, 97, 99);
+      }
+      log.info({ outputPath, transitionEffect, hasSfx, hasSegC }, 'Successfully generated Hook Commentary + Replay video with transition, SFX & BGM');
+    } finally {
+      try { fs.unlinkSync(tmpAssPathA); } catch {}
+      try { fs.unlinkSync(segAPath); } catch {}
+      try { fs.unlinkSync(segBPath); } catch {}
+      try { fs.unlinkSync(segBRawPath); } catch {}
+      try { if (hasSegC) fs.unlinkSync(segCPath); } catch {}
+      try { if (hasSegC && tmpAssPathC) fs.unlinkSync(tmpAssPathC); } catch {}
+      try { if (useSeg0) fs.unlinkSync(seg0Path); } catch {}
+    }
+  }
+
+  /**
+   * Overlays generated Talking Avatar MP4 onto rendered commentary video using dynamic FFmpeg filter.
+   */
+  async overlayAvatarVideo(
+    sourceVideoPath: string,
+    avatarVideoPath: string,
+    avatarConfig?: AvatarConfig
+  ): Promise<void> {
+    if (!avatarVideoPath || !fs.existsSync(avatarVideoPath)) return;
+    if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) return;
+
+    log.info({ sourceVideoPath, avatarVideoPath, avatarConfig }, 'Overlaying Talking Avatar onto commentary video...');
+
+    const tmpOut = path.join(os.tmpdir(), `avatar_overlay_${Date.now()}.mp4`);
+    const pos = avatarConfig?.position || 'bottom-right';
+    const scalePercent = Math.max(10, Math.min(80, avatarConfig?.scalePercent || 30));
+    const chromaKey = avatarConfig?.chromaKeyGreen ?? false;
+
+    // Calculate width relative to horizontal Shorts canvas (1080px width) to make PIP scaling more natural
+    const targetWidth = Math.round(1080 * (scalePercent / 100));
+
+    let overlayExpr = `main_w-overlay_w-30:main_h-overlay_h-50`;
+    if (pos === 'bottom-left') {
+      overlayExpr = `30:main_h-overlay_h-50`;
+    } else if (pos === 'top-right') {
+      overlayExpr = `main_w-overlay_w-30:50`;
+    } else if (pos === 'top-left') {
+      overlayExpr = `30:50`;
+    } else if (pos === 'custom') {
+      const cx = avatarConfig?.customX ?? 30;
+      const cy = avatarConfig?.customY ?? 50;
+      overlayExpr = `${cx}:${cy}`;
+    }
+
+    let avatarFilter = `[1:v]scale=${targetWidth}:-1[av_scaled];`;
+    if (chromaKey) {
+      avatarFilter += `[av_scaled]chromakey=0x00FF00:0.1:0.2[av_ready];`;
+    } else {
+      avatarFilter += `[av_scaled]copy[av_ready];`;
+    }
+
+    // Use eof_action=pass (NOT shortest=1) so main video duration & audio are never truncated!
+    const filterComplex = `${avatarFilter}[0:v][av_ready]overlay=${overlayExpr}:eof_action=pass[vout]`;
+
+    const args = [
+      '-y',
+      '-i', sourceVideoPath,
+      '-stream_loop', '-1',
+      '-i', avatarVideoPath,
+      '-filter_complex', filterComplex,
+      '-map', '[vout]',
+      '-map', '0:a',
+      '-c:v', 'libx264',
+      '-crf', '17',
+      '-preset', 'medium',
+      '-threads', '4',
+      '-c:a', 'copy',
+      tmpOut,
+    ];
+
+    try {
+      const origDur = await this.getVideoDurationMs(sourceVideoPath);
+      await runProcess('ffmpeg', args);
+      const newDur = await this.getVideoDurationMs(tmpOut);
+
+      // Only accept overlay if output file is valid and preserves at least 95% of original video duration
+      if (fs.existsSync(tmpOut) && fs.statSync(tmpOut).size > 1000 && (origDur === 0 || newDur >= origDur * 0.95)) {
+        fs.copyFileSync(tmpOut, sourceVideoPath);
+        log.info({ sourceVideoPath, origDur, newDur }, 'Successfully overlaid Talking Avatar onto commentary video');
+      } else {
+        log.warn({ origDur, newDur }, 'Overlay output truncated or invalid, keeping original commentary video');
+      }
+    } catch (err) {
+      log.warn({ err }, 'Failed to overlay avatar video, keeping original commentary video');
+    } finally {
+      try { if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut); } catch {}
+    }
+  }
 }
+
+
