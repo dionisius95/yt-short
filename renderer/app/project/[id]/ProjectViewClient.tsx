@@ -56,9 +56,12 @@ export default function ProjectViewPage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [ollamaError, setOllamaError] = useState(false);
   const [momentTheme, setMomentTheme] = useState('');
+  const [translatedWords, setTranslatedWords] = useState<import('../../../../shared/types').TranscriptWord[] | undefined>(undefined);
 
   // Keep local hook list in sync after mount
   useEffect(() => { setActiveHooks(hooks); }, [hooks]);
+  // Reset translated words when transcript refreshes from parent
+  useEffect(() => { setTranslatedWords(undefined); }, [transcript]);
 
   const handleRunAnalysis = async () => {
     setAnalyzing(true);
@@ -106,6 +109,15 @@ export default function ProjectViewPage() {
     } catch { /* ignore */ }
   };
 
+  const refreshClip = async (hookIdToRefresh = selectedHookId) => {
+    if (!hookIdToRefresh) return;
+    try {
+      const clips = await ipc.clips.list(projectId);
+      const clip = clips.find((c) => c.hookId === hookIdToRefresh) ?? null;
+      setCurrentClip(clip);
+    } catch { /* ignore */ }
+  };
+
   // ── Loading state ──
   if (loading) {
     return (
@@ -149,8 +161,8 @@ export default function ProjectViewPage() {
           value={momentTheme}
           onChange={(e) => setMomentTheme(e.target.value)}
           disabled={analyzing || !transcript}
-          placeholder="tema momen (opsional)"
-          aria-label="Tema momen yang ingin dicari, misal: lucu, seru, sedih"
+          placeholder="filter adegan/kata"
+          aria-label="Filter adegan atau kata kunci pada naskah"
           maxLength={200}
           className={cn(
             'rounded-md border border-border bg-surface px-3 py-1.5 pr-7',
@@ -164,7 +176,7 @@ export default function ProjectViewPage() {
           <button
             type="button"
             onClick={() => setMomentTheme('')}
-            aria-label="Hapus tema"
+            aria-label="Hapus filter"
             className="absolute right-2 top-1/2 -translate-y-1/2 text-text-secondary hover:text-text-primary transition-micro"
           >
             <svg width="9" height="9" viewBox="0 0 24 24" fill="none"
@@ -179,7 +191,7 @@ export default function ProjectViewPage() {
         type="button"
         disabled={analyzing || !transcript}
         onClick={() => void handleRunAnalysis()}
-        title={!transcript ? 'Transcribe first before analyzing' : momentTheme.trim() ? `Cari momen: "${momentTheme.trim()}"` : 'Cari semua momen menarik'}
+        title={!transcript ? 'Ekstrak audio terlebih dahulu' : momentTheme.trim() ? `Filter adegan: "${momentTheme.trim()}"` : 'Deteksi potong adegan'}
         className={cn(
           'flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5',
           'text-xs font-medium text-text-secondary',
@@ -197,7 +209,7 @@ export default function ProjectViewPage() {
             <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
           </svg>
         )}
-        {analyzing ? 'Analyzing…' : 'Run Analysis'}
+        {analyzing ? 'Scanning Scenes…' : 'Detect Scene Cuts'}
       </button>
       <button
         type="button"
@@ -214,7 +226,7 @@ export default function ProjectViewPage() {
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent'
         )}
       >
-        Export Queue →
+        Render Queue →
       </button>
     </div>
   );
@@ -223,7 +235,7 @@ export default function ProjectViewPage() {
     <>
       <AppShell title={project.title} actions={actions}>
         {/* 3-column grid — fills the remaining vertical space */}
-        <div className="grid h-full grid-cols-[280px_1fr_260px] overflow-hidden">
+        <div className="grid h-full grid-cols-[280px_1fr_340px] overflow-hidden">
           <TranscriptPanel
             projectId={projectId}
             transcript={transcript}
@@ -246,10 +258,13 @@ export default function ProjectViewPage() {
           <ClipPreviewPanel
             clip={currentClip}
             hookId={selectedHookId}
+            projectId={projectId}
             defaultSettings={DEFAULT_SETTINGS}
-            words={transcript?.words}
+            words={translatedWords ?? transcript?.words}
             hookStartMs={selectedHook?.startMs}
             hookEndMs={selectedHook?.endMs}
+            onTranscriptChanged={(w) => setTranslatedWords(w)}
+            onRefresh={refreshClip}
           />
         </div>
       </AppShell>

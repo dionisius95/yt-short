@@ -341,6 +341,10 @@ function buildStubServices(overrides: PartialServices = {}): import('../../elect
     detectScenes: vi.fn().mockResolvedValue({ cuts: [], framesAnalyzed: 0 }),
     detectSpeakers: vi.fn().mockResolvedValue({ segments: [], speakerCount: 0, method: 'none' }),
     getTranscript: vi.fn().mockResolvedValue(null),
+    generateMetadata: vi.fn().mockResolvedValue(null),
+    saveCustomThumbnail: vi.fn().mockResolvedValue(''),
+    searchYouTube: vi.fn().mockResolvedValue([]),
+    searchClipCafe: vi.fn().mockResolvedValue([]),
     ...overrides,
-  };
+  } as unknown as import('../../electron/ipc/handlers').IpcServices;
 }

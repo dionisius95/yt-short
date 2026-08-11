@@ -2,7 +2,6 @@
 const nextConfig = {
   // Static export for Electron compatibility — output goes to renderer/out
   output: 'export',
-  distDir: 'out',
 
   // Disable image optimization (not available in static export)
   images: {

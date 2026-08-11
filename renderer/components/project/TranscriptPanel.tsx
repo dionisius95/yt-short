@@ -2,17 +2,17 @@
 
 /**
  * TranscriptPanel — scrollable transcript with inline editing, transcription progress,
- * and speaker detection labels.
+ * speaker detection labels, and auto-translate caption support.
  * Requirements: 4.1, 4.2, 4.7, 4.8, 9.2
  */
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { TranscriptWordSpan } from './TranscriptWord';
 import { ProgressBar } from '../ui/ProgressBar';
 import { ipc } from '../../lib/ipc-client';
 import { useIpcEvent } from '../../hooks/useIpcEvent';
 import { usePipeline } from '../../hooks/usePipeline';
-import type { Transcript, SpeakerSegment } from '../../../shared/types';
+import type { Transcript, SpeakerSegment, AppSettings } from '../../../shared/types';
 import { cn } from '../../lib/utils';
 
 // Speaker colors — cycle through these for each unique speaker
@@ -50,6 +50,17 @@ export function TranscriptPanel({ projectId, transcript: initialTranscript, proj
   const [translating, setTranslating] = useState(false);
   const [translateError, setTranslateError] = useState<string | null>(null);
   const [showTranslateMenu, setShowTranslateMenu] = useState(false);
+  const [autoTranslateStatus, setAutoTranslateStatus] = useState<'idle' | 'translating' | 'done' | 'skipped'>('idle');
+  const [autoTranslateLang, setAutoTranslateLang] = useState<string>('');
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+
+  // Load settings once on mount to get translationLanguage
+  useEffect(() => {
+    void ipc.settings.get().then(setSettings).catch(() => {});
+  }, []);
+
+  // Track whether auto-translate has already run for this session
+  const autoTranslateRanRef = useRef(false);
 
   // Derive speaker IDs from transcript words (Deepgram diarization) or from
   // manually-detected speaker segments — whichever is available.
@@ -86,6 +97,50 @@ export function TranscriptPanel({ projectId, transcript: initialTranscript, proj
   const effectiveTranscribing = transcribing && !pipeline.running;
   const effectivePercent = transcribePercent;
 
+  /**
+   * Auto-translate: runs after transcription completes if user configured a
+   * target language in settings AND the transcript language differs from target.
+   * @param tx - the freshly transcribed transcript
+   * @param force - bypass the "already ran" guard (used for manual re-trigger)
+   */
+  const triggerAutoTranslate = async (tx: Transcript, force = false) => {
+    // Only run once per component mount to avoid translating on every re-render
+    // unless force=true (manual re-trigger by user)
+    if (!force && autoTranslateRanRef.current) return;
+
+    // Always fetch fresh settings so we don't miss a recently-saved change
+    const currentSettings = await ipc.settings.get().catch(() => null);
+    if (!currentSettings) return;
+
+    const targetLang = currentSettings.translationLanguage?.trim();
+    if (!targetLang) return; // no target language configured
+
+    const sourceLang = tx.language?.toLowerCase() ?? '';
+    const target = targetLang.toLowerCase();
+
+    // Skip if transcript already in target language
+    if (sourceLang === target || sourceLang.startsWith(target + '-')) return;
+    // Also skip if no words
+    if (!tx.words.length) return;
+
+    autoTranslateRanRef.current = true;
+    setAutoTranslateLang(targetLang);
+    setAutoTranslateStatus('translating');
+    setTranslateError(null);
+    try {
+      await ipc.translate.start(projectId, targetLang);
+      const translated = await ipc.transcribe.getTranscript(projectId);
+      if (translated) {
+        setTranscript(translated);
+        onTranscriptReady?.(translated);
+      }
+      setAutoTranslateStatus('done');
+    } catch (err) {
+      setAutoTranslateStatus('skipped');
+      setTranslateError(err instanceof Error ? err.message : 'Auto-translate failed.');
+    }
+  };
+
   // When pipeline reaches 'done', refresh transcript and notify parent
   useIpcEvent<{ projectId: string; stage: string; stageProgress: number; overallProgress: number }>(
     'pipeline:progress',
@@ -94,7 +149,12 @@ export function TranscriptPanel({ projectId, transcript: initialTranscript, proj
       if (data.stage === 'done') {
         try {
           const tx = await ipc.transcribe.getTranscript(projectId);
-          if (tx) { setTranscript(tx); onTranscriptReady?.(tx); }
+          if (tx) {
+            setTranscript(tx);
+            onTranscriptReady?.(tx);
+            // Trigger auto-translate if setting is configured
+            void triggerAutoTranslate(tx);
+          }
         } catch { /* ignore */ }
         onPipelineDone?.();
       }
@@ -125,6 +185,8 @@ export function TranscriptPanel({ projectId, transcript: initialTranscript, proj
       if (tx) {
         setTranscript(tx);
         onTranscriptReady?.(tx);
+        // Trigger auto-translate after manual transcription too
+        void triggerAutoTranslate(tx);
       }
     } catch (err) {
       setTranscribing(false);
@@ -189,12 +251,29 @@ export function TranscriptPanel({ projectId, transcript: initialTranscript, proj
       {/* Header */}
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <h2 className="text-xs font-semibold uppercase tracking-widest text-text-secondary">
-          Transcript
+          Source Audio & Captions
         </h2>
         <div className="flex items-center gap-2">
           {transcript && (
             <span className="text-[10px] text-text-secondary font-mono">
-              {transcript.words.length} words · {transcript.language.toUpperCase()}
+              {transcript.words.length} words
+              {' · '}
+              <span
+                title={`Detected language: ${transcript.language.toUpperCase()}`}
+                className={cn(
+                  'font-semibold',
+                  settings?.translationLanguage && transcript.language.toLowerCase() !== settings.translationLanguage.toLowerCase()
+                    ? 'text-amber-400'
+                    : 'text-text-secondary'
+                )}
+              >
+                {transcript.language.toUpperCase()}
+              </span>
+              {settings?.translationLanguage && transcript.language.toLowerCase() !== settings.translationLanguage.toLowerCase() && (
+                <span className="ml-1 text-text-secondary/60">
+                  → {settings.translationLanguage.toUpperCase()}
+                </span>
+              )}
             </span>
           )}
           {transcript && (
@@ -269,8 +348,8 @@ export function TranscriptPanel({ projectId, transcript: initialTranscript, proj
         </div>
       </div>
 
-      {/* Translation error/progress */}
-      {translateError && (
+      {/* Translation error/progress — for manual translate only */}
+      {translateError && autoTranslateStatus !== 'skipped' && (
         <div className="border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-[10px] text-destructive">
           {translateError}
         </div>
@@ -278,7 +357,84 @@ export function TranscriptPanel({ projectId, transcript: initialTranscript, proj
       {translating && (
         <div className="flex items-center gap-2 border-b border-border px-4 py-2">
           <span className="h-3 w-3 animate-spin rounded-full border-2 border-border border-t-accent" />
-          <span className="text-[10px] text-text-secondary animate-pulse">Translating via Ollama…</span>
+          <span className="text-[10px] text-text-secondary animate-pulse">Translating…</span>
+        </div>
+      )}
+
+      {/* Auto-translate status banner */}
+      {autoTranslateStatus === 'translating' && (
+        <div className="flex items-center gap-2 border-b border-accent/20 bg-accent/5 px-4 py-2">
+          <span className="h-3 w-3 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
+          <span className="text-[10px] text-accent">
+            🌐 Auto-translating to{' '}
+            <span className="font-semibold">
+              {TRANSLATE_LANGS.find((l) => l.code === autoTranslateLang)?.label ?? autoTranslateLang.toUpperCase()}
+            </span>…
+          </span>
+        </div>
+      )}
+      {autoTranslateStatus === 'done' && (
+        <div className="flex items-center justify-between border-b border-success/20 bg-success/5 px-4 py-2">
+          <span className="text-[10px] text-success">
+            ✓ Auto-translated to{' '}
+            <span className="font-semibold">
+              {TRANSLATE_LANGS.find((l) => l.code === autoTranslateLang)?.label ?? autoTranslateLang.toUpperCase()}
+            </span>
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              title="Re-run auto translate"
+              disabled={translating}
+              onClick={() => {
+                if (!transcript) return;
+                autoTranslateRanRef.current = false;
+                void triggerAutoTranslate(transcript, true);
+              }}
+              className="text-[10px] text-text-secondary hover:text-accent underline underline-offset-2"
+            >
+              Re-run
+            </button>
+            <button
+              type="button"
+              onClick={() => setAutoTranslateStatus('idle')}
+              className="text-[10px] text-text-secondary hover:text-text-primary"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+      {autoTranslateStatus === 'skipped' && translateError && (
+        <div className="flex items-center justify-between border-b border-amber-500/20 bg-amber-500/5 px-4 py-2">
+          <span className="text-[10px] text-amber-400">
+            ⚠ Auto-translate skipped — {translateError}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              title="Retry auto translate"
+              disabled={translating}
+              onClick={() => {
+                if (!transcript) return;
+                autoTranslateRanRef.current = false;
+                setTranslateError(null);
+                void triggerAutoTranslate(transcript, true);
+              }}
+              className="text-[10px] text-text-secondary hover:text-accent underline underline-offset-2"
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              onClick={() => { setAutoTranslateStatus('idle'); setTranslateError(null); }}
+              className="text-[10px] text-text-secondary hover:text-text-primary"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
         </div>
       )}
 
@@ -359,7 +515,7 @@ export function TranscriptPanel({ projectId, transcript: initialTranscript, proj
             <div>
               <p className="text-sm font-medium text-text-primary">Transcription pending</p>
               <p className="mt-1 text-xs text-text-secondary">
-                AI-powered speech-to-text using Whisper.cpp
+                Speech-to-text using Whisper.cpp
               </p>
             </div>
 

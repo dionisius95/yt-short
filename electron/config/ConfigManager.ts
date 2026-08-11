@@ -38,12 +38,28 @@ function buildDefaults(): AppSettings {
     googleTtsApiKey: '',
     deepgramApiKey: '',
     googleSttServiceAccountPath: '',
-    geminiApiKey: '',
+    xttsColabUrl: '',
+    speakerAudioPath: '',
     autoAttribution: true,
     attributionTemplate: 'Sumber / Source: {title}\n{url}\nAll rights belong to the original creator.',
     defaultAudioMode: 'keep',
     backgroundMusicPath: '',
     musicVolume: 0.8,
+    youtubeApiKey: '',
+    ytDlpCookiesBrowser: '',
+    tiktokSessionId: '',
+    facebookPageId: '',
+    facebookAccessToken: '',
+    telegramBotToken: '',
+    telegramChatId: '',
+    telegramApiServer: 'https://api.telegram.org',
+    telegramUseUserbot: false,
+    telegramApiId: 0,
+    telegramApiHash: '',
+    telegramPhone: '',
+    telegramSession: '',
+    accounts: [],
+    previewPresets: [],
   };
 }
 
@@ -90,7 +106,8 @@ export class ConfigManager {
         googleTtsApiKey: { type: 'string' },
         deepgramApiKey: { type: 'string' },
         googleSttServiceAccountPath: { type: 'string' },
-        geminiApiKey: { type: 'string' },
+        xttsColabUrl: { type: 'string' },
+        speakerAudioPath: { type: 'string' },
         autoAttribution: { type: 'boolean' },
         attributionTemplate: { type: 'string' },
         defaultAudioMode: {
@@ -99,6 +116,21 @@ export class ConfigManager {
         },
         backgroundMusicPath: { type: 'string' },
         musicVolume: { type: 'number' },
+        youtubeApiKey: { type: 'string' },
+        ytDlpCookiesBrowser: { type: 'string' },
+        tiktokSessionId: { type: 'string' },
+        facebookPageId: { type: 'string' },
+        facebookAccessToken: { type: 'string' },
+        telegramBotToken: { type: 'string' },
+        telegramChatId: { type: 'string' },
+        telegramApiServer: { type: 'string' },
+        telegramUseUserbot: { type: 'boolean' },
+        telegramApiId: { type: 'number' },
+        telegramApiHash: { type: 'string' },
+        telegramPhone: { type: 'string' },
+        telegramSession: { type: 'string' },
+        accounts: { type: 'array' },
+        previewPresets: { type: 'array' },
       },
     });
   }
@@ -107,21 +139,33 @@ export class ConfigManager {
    * Retrieve a single setting by key.
    */
   get<K extends keyof AppSettings>(key: K): AppSettings[K] {
-    return this.store.get(key) as AppSettings[K];
+    const val = this.store.get(key);
+    if (typeof val === 'string') {
+      return val.trim() as AppSettings[K];
+    }
+    return val as AppSettings[K];
   }
 
   /**
    * Persist a single setting by key.
    */
   set<K extends keyof AppSettings>(key: K, value: AppSettings[K]): void {
-    this.store.set(key, value);
+    const val = typeof value === 'string' ? value.trim() : value;
+    this.store.set(key, val as AppSettings[K]);
   }
 
   /**
    * Return a snapshot of all settings.
    */
   getAll(): AppSettings {
-    return this.store.store as AppSettings;
+    const raw = this.store.store as AppSettings;
+    const clean = { ...raw };
+    for (const k of Object.keys(clean) as Array<keyof AppSettings>) {
+      if (typeof clean[k] === 'string') {
+        (clean as any)[k] = (clean[k] as string).trim();
+      }
+    }
+    return clean;
   }
 
   /**
@@ -133,5 +177,25 @@ export class ConfigManager {
     for (const [key, value] of Object.entries(this.defaults) as [keyof AppSettings, AppSettings[keyof AppSettings]][]) {
       this.store.set(key, value);
     }
+  }
+
+  getAccounts(): import('../../shared/types').UploadAccount[] {
+    const raw = this.store.get('accounts');
+    if (Array.isArray(raw)) return raw;
+    return [];
+  }
+
+  saveAccounts(accounts: import('../../shared/types').UploadAccount[]): void {
+    this.store.set('accounts', accounts);
+  }
+
+  getPreviewPresets(): import('../../shared/types').PreviewPreset[] {
+    const raw = this.store.get('previewPresets');
+    if (Array.isArray(raw)) return raw;
+    return [];
+  }
+
+  savePreviewPresets(presets: import('../../shared/types').PreviewPreset[]): void {
+    this.store.set('previewPresets', presets);
   }
 }

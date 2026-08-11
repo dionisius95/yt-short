@@ -93,7 +93,7 @@ export function ImportForm({ initialUrl = '', isSubmitting, onSubmit, onLocalImp
                 : 'bg-surface text-text-secondary hover:text-text-primary'
             )}
           >
-            {m === 'url' ? '🔗 YouTube URL' : '📁 Local File'}
+            {m === 'url' ? '🔗 Video URL' : '📁 Local File'}
           </button>
         ))}
       </div>
@@ -102,7 +102,7 @@ export function ImportForm({ initialUrl = '', isSubmitting, onSubmit, onLocalImp
       {mode === 'url' && (
         <div className="flex flex-col gap-1.5">
           <label htmlFor="import-url-input" className="text-sm font-medium text-text-primary">
-            YouTube URL
+            Video URL (YouTube / TikTok / RedNote / Clip.Cafe)
           </label>
           <div className="relative">
             <input
@@ -111,7 +111,7 @@ export function ImportForm({ initialUrl = '', isSubmitting, onSubmit, onLocalImp
               type="url"
               value={url}
               onChange={(e) => { setUrl(e.target.value); setTouched(true); }}
-              placeholder="Paste YouTube URL here…"
+              placeholder="Paste YouTube, TikTok, or RedNote/Xiaohongshu URL here…"
               disabled={isSubmitting}
               aria-invalid={showError}
               aria-describedby={showError ? 'import-url-error' : undefined}
@@ -141,7 +141,7 @@ export function ImportForm({ initialUrl = '', isSubmitting, onSubmit, onLocalImp
           </div>
           {showError && (
             <p id="import-url-error" role="alert" className="text-xs text-destructive">
-              Please enter a valid YouTube URL (youtube.com/watch, youtu.be, or youtube.com/shorts).
+              Please enter a valid YouTube, TikTok, RedNote/Xiaohongshu, or Clip.Cafe URL.
             </p>
           )}
         </div>
@@ -150,13 +150,13 @@ export function ImportForm({ initialUrl = '', isSubmitting, onSubmit, onLocalImp
       {/* Local file mode */}
       {mode === 'local' && (
         <div className="flex flex-col gap-3">
-          <label className="text-sm font-medium text-text-primary">Video File</label>
+          <label className="text-sm font-medium text-text-primary">Local File</label>
 
           {/* Drop zone / picker */}
           <div
             role="button"
             tabIndex={0}
-            aria-label="Choose video file"
+            aria-label="Choose file"
             onClick={() => void handlePickFile()}
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') void handlePickFile(); }}
             onDragOver={(e) => e.preventDefault()}
@@ -204,7 +204,7 @@ export function ImportForm({ initialUrl = '', isSubmitting, onSubmit, onLocalImp
                 <div className="text-center">
                   <p className="text-sm font-medium text-text-primary">Click to choose file</p>
                   <p className="text-xs text-text-secondary mt-1">or drag & drop</p>
-                  <p className="text-[10px] text-text-secondary mt-1">MP4, MKV, WebM, MOV, AVI</p>
+                  <p className="text-[10px] text-text-secondary mt-1">All Files (*.*) supported</p>
                 </div>
               </>
             )}

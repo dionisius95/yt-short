@@ -3,7 +3,7 @@ import '../styles/globals.css';
 import { ElectronBanner } from '../components/ui/ElectronBanner';
 
 export const metadata: Metadata = {
-  title: 'AI Shorts Generator',
+  title: 'Shorts Editor',
   description: 'Transform long-form YouTube videos into viral short-form clips',
 };
 

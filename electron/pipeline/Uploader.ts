@@ -6,6 +6,9 @@
  */
 
 import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { execSync } from 'child_process';
 import { BrowserWindow } from 'electron';
 import { google } from 'googleapis';
 import { CHANNELS } from '../ipc/channels';
@@ -27,7 +30,8 @@ function emitProgress(clipId: string, percent: number): void {
 }
 
 function privacyStatus(p: PrivacySetting): string {
-  return p; // 'public' | 'unlisted' | 'private' — matches YouTube API values
+  if (p === 'private_scheduled') return 'private';
+  return p;
 }
 
 // ---------------------------------------------------------------------------
@@ -75,19 +79,34 @@ export class Uploader {
 
     emitProgress(req.clipId, 5);
 
+    const statusObj: { privacyStatus: string; publishAt?: string } = {
+      privacyStatus: privacyStatus(req.privacy),
+    };
+
+    if (req.privacy === 'private_scheduled' && req.publishAt) {
+      statusObj.publishAt = req.publishAt;
+    }
+
+    const snippetObj: any = {
+      title:       req.title       || 'AI Short',
+      description: req.description || '',
+      tags:        req.tags        || [],
+      categoryId:  req.categoryId  || '22',
+    };
+
+    if (req.defaultLanguage) {
+      snippetObj.defaultLanguage = req.defaultLanguage;
+    }
+    if (req.defaultAudioLanguage) {
+      snippetObj.defaultAudioLanguage = req.defaultAudioLanguage;
+    }
+
     const response = await youtube.videos.insert(
       {
         part: ['snippet', 'status'],
         requestBody: {
-          snippet: {
-            title:       req.title       || 'AI Short',
-            description: req.description || '',
-            tags:        req.tags        || [],
-            categoryId:  '22', // People & Blogs
-          },
-          status: {
-            privacyStatus: privacyStatus(req.privacy),
-          },
+          snippet: snippetObj,
+          status: statusObj,
         },
         media: {
           mimeType: 'video/mp4',
@@ -105,6 +124,43 @@ export class Uploader {
 
     const videoId = response.data.id;
     if (!videoId) throw new Error('YouTube upload succeeded but no video ID returned');
+
+    // Upload custom thumbnail if requested
+    if (req.customThumbnailPath && fs.existsSync(req.customThumbnailPath)) {
+      let tempJpg: string | null = null;
+      try {
+        log.info({ videoId, thumbnailPath: req.customThumbnailPath }, 'Uploading custom thumbnail to YouTube');
+
+        // Convert image to guaranteed 100% valid YouTube JPEG via FFmpeg
+        const tempPath = path.join(os.tmpdir(), `yt_thumb_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.jpg`);
+        try {
+          execSync(`ffmpeg -y -i "${req.customThumbnailPath}" -q:v 2 "${tempPath}"`, { stdio: 'ignore' });
+          if (fs.existsSync(tempPath)) {
+            tempJpg = tempPath;
+          }
+        } catch {
+          // If ffmpeg conversion fails, fallback to original file
+        }
+
+        const uploadPath = tempJpg || req.customThumbnailPath;
+        const mimeType = uploadPath.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+
+        await youtube.thumbnails.set({
+          videoId,
+          media: {
+            mimeType,
+            body: fs.createReadStream(uploadPath),
+          },
+        });
+        log.info({ videoId }, 'Custom thumbnail uploaded successfully');
+      } catch (thumbErr: any) {
+        log.warn({ videoId, err: thumbErr?.message }, 'Custom thumbnail upload failed (channel may not be phone-verified for custom thumbnails)');
+      } finally {
+        if (tempJpg && fs.existsSync(tempJpg)) {
+          try { fs.unlinkSync(tempJpg); } catch {}
+        }
+      }
+    }
 
     const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
     log.info({ clipId: req.clipId, videoId, youtubeUrl }, 'Upload complete');

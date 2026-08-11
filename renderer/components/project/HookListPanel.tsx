@@ -40,10 +40,17 @@ export function HookListPanel({
   const router = useRouter();
   const [generatingAll, setGeneratingAll] = useState(false);
 
-  // Filter dismissed and sort by viralScore descending
+  // Filter dismissed and sort by viralScore descending, prioritizing Full video clip to the very top
   const visible = hooks
     .filter((h) => !h.dismissed)
-    .sort((a, b) => b.viralScore - a.viralScore);
+    .sort((a, b) => {
+      const aIsFull = a.summary === 'Full video clip' || (a.startMs === 0 && a.endMs === projectDurationMs);
+      const bIsFull = b.summary === 'Full video clip' || (b.startMs === 0 && b.endMs === projectDurationMs);
+      if (aIsFull && !bIsFull) return -1;
+      if (!aIsFull && bIsFull) return 1;
+      return b.viralScore - a.viralScore;
+    });
+
 
   const handleGenerateAll = async () => {
     setGeneratingAll(true);
@@ -66,11 +73,11 @@ export function HookListPanel({
       {/* Header */}
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <h2 className="text-xs font-semibold uppercase tracking-widest text-text-secondary">
-          Hooks
+          Timeline Sequences & Cuts
         </h2>
         {visible.length > 0 && (
           <span className="text-[10px] font-mono text-text-secondary">
-            {visible.length} found
+            {visible.length} sequences
           </span>
         )}
       </div>

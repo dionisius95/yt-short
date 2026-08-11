@@ -81,9 +81,10 @@ function runProcess(
   command: string,
   args: string[],
   onStderr?: (line: string) => void,
+  env?: NodeJS.ProcessEnv,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env: env || process.env });
 
     let stdout = '';
     let stderr = '';
@@ -404,6 +405,13 @@ export class Transcriber {
 
     log.debug({ projectId, python, args }, 'Spawning faster-whisper');
 
+    const env = {
+      ...process.env,
+      MKL_NUM_THREADS: '1',
+      OMP_NUM_THREADS: '1',
+      MKL_DOMAIN_NUM_THREADS: '1',
+    };
+
     await runProcess(python, args, (line) => {
       // faster-whisper prints e.g. "Transcribing: 42%" or "progress = 42"
       const matchPct  = line.match(/(\d+)\s*%/);
@@ -412,7 +420,7 @@ export class Transcriber {
       if (raw !== null) {
         onProgress?.(parseInt(raw, 10));
       }
-    });
+    }, env);
   }
 
   // ---------------------------------------------------------------------------
@@ -747,7 +755,7 @@ export class Transcriber {
         'Authorization': `Token ${apiKey}`,
         'Content-Type': mimeType,
       },
-      body: audioBuffer,
+      body: audioBuffer as any,
     });
 
     if (!response.ok) {

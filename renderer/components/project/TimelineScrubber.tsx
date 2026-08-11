@@ -25,14 +25,14 @@ type Handle = 'start' | 'end';
 const MIN_DURATION_MS = 1000; // 1 s minimum clip
 
 // ---------------------------------------------------------------------------
-// Parse "M:SS", "MM:SS", "M:SS.s", "SS" → milliseconds
+// Parse "M:SS", "MM:SS", "M:SS.s", "M:SS.mmm", "SS", "SS.mmm" → milliseconds
 // Returns null if unparseable.
 // ---------------------------------------------------------------------------
-function parseTimeInput(raw: string): number | null {
+export function parseTimeInput(raw: string): number | null {
   const s = raw.trim();
   if (!s) return null;
 
-  // MM:SS or M:SS or MM:SS.s
+  // MM:SS or M:SS or MM:SS.s or M:SS.mmm
   const colonMatch = s.match(/^(\d{1,2}):(\d{2})(\.\d+)?$/);
   if (colonMatch) {
     const mins = parseInt(colonMatch[1], 10);
@@ -41,7 +41,7 @@ function parseTimeInput(raw: string): number | null {
     return Math.round((mins * 60 + secs) * 1000);
   }
 
-  // Plain seconds e.g. "90" or "90.5"
+  // Plain seconds e.g. "90" or "90.5" or "90.500"
   const secMatch = s.match(/^(\d+)(\.\d+)?$/);
   if (secMatch) {
     return Math.round(parseFloat(s) * 1000);
@@ -87,10 +87,10 @@ function TimeInput({
         if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
       }}
       onClick={(e) => e.stopPropagation()}
-      placeholder="M:SS"
-      aria-label="Enter time"
+      placeholder="M:SS.mmm"
+      aria-label="Enter time with milliseconds"
       className={cn(
-        'w-14 rounded border border-accent bg-surface px-1 py-0 text-center',
+        'w-24 rounded border border-accent bg-surface px-1 py-0 text-center',
         'font-mono text-[10px] text-accent',
         'focus:outline-none focus:ring-1 focus:ring-accent',
       )}
@@ -159,9 +159,9 @@ export function TimelineScrubber({
     draggingHandle.current = null;
   };
 
-  // Keyboard: arrow keys adjust by 1 s
+  // Keyboard: arrow keys adjust start/end times (default: 100 ms, Shift: 1 s, Alt: 10 ms)
   const handleKeyDown = (handle: Handle) => (e: React.KeyboardEvent) => {
-    const STEP = 1000;
+    const STEP = e.shiftKey ? 1000 : e.altKey ? 10 : 100;
     if (handle === 'start') {
       if (e.key === 'ArrowLeft')  { e.preventDefault(); onChangeCommitted(Math.max(0, startMs - STEP), endMs); }
       if (e.key === 'ArrowRight') { e.preventDefault(); onChangeCommitted(Math.min(startMs + STEP, endMs - MIN_DURATION_MS), endMs); }
@@ -185,7 +185,7 @@ export function TimelineScrubber({
 
   const startPct = pct(startMs);
   const endPct   = pct(endMs);
-  const durationSec = Math.round((endMs - startMs) / 1000);
+  const durationSec = ((endMs - startMs) / 1000).toFixed(3);
 
   return (
     <div className="flex flex-col gap-1.5 select-none" aria-label="Timeline scrubber">
@@ -256,7 +256,7 @@ export function TimelineScrubber({
         ) : (
           <button
             type="button"
-            title="Click to edit start time"
+            title="Click to edit start time with milliseconds"
             onClick={() => setEditingHandle('start')}
             className={cn(
               'rounded px-1 py-0.5 font-mono text-[10px]',
@@ -282,7 +282,7 @@ export function TimelineScrubber({
         ) : (
           <button
             type="button"
-            title="Click to edit end time"
+            title="Click to edit end time with milliseconds"
             onClick={() => setEditingHandle('end')}
             className={cn(
               'rounded px-1 py-0.5 font-mono text-[10px]',
@@ -298,7 +298,7 @@ export function TimelineScrubber({
 
       {/* Hint text */}
       <p className="text-[9px] text-text-secondary opacity-60 text-center">
-        drag handles or click time to edit (M:SS)
+        drag handles, arrows (Shift:1s, Alt:10ms, default:100ms), or click time (M:SS.mmm)
       </p>
     </div>
   );

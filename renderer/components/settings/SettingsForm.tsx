@@ -17,10 +17,10 @@ interface SettingsFormProps {
   onError: (msg: string) => void;
 }
 
-const QUALITY_OPTS   = [{ value: '1080p', label: '1080p' }, { value: '720p', label: '720p' }, { value: '480p', label: '480p' }, { value: '360p', label: '360p' }];
-const STYLE_OPTS     = [{ value: 'bold-white', label: 'Bold White' }, { value: 'gradient-pop', label: 'Gradient Pop' }, { value: 'minimal-clean', label: 'Minimal' }];
-const POSITION_OPTS  = [{ value: 'lower-third', label: 'Lower' }, { value: 'upper-third', label: 'Upper' }, { value: 'center', label: 'Center' }];
-const WHISPER_OPTS   = [{ value: 'tiny', label: 'Tiny' }, { value: 'base', label: 'Base' }, { value: 'small', label: 'Small' }, { value: 'medium', label: 'Medium' }, { value: 'large', label: 'Large' }];
+const QUALITY_OPTS = [{ value: '1080p', label: '1080p' }, { value: '720p', label: '720p' }, { value: '480p', label: '480p' }, { value: '360p', label: '360p' }];
+const STYLE_OPTS = [{ value: 'bold-white', label: 'Bold White' }, { value: 'gradient-pop', label: 'Gradient Pop' }, { value: 'minimal-clean', label: 'Minimal' }, { value: 'none', label: 'Tidak Ditampilkan (None)' }];
+const POSITION_OPTS = [{ value: 'lower-third', label: 'Lower' }, { value: 'upper-third', label: 'Upper' }, { value: 'center', label: 'Center' }];
+const WHISPER_OPTS = [{ value: 'tiny', label: 'Tiny' }, { value: 'base', label: 'Base' }, { value: 'small', label: 'Small' }, { value: 'medium', label: 'Medium' }, { value: 'large', label: 'Large' }];
 
 function SectionHeader({ title }: { title: string }) {
   return (
@@ -30,11 +30,12 @@ function SectionHeader({ title }: { title: string }) {
   );
 }
 
-function Field({ label, id, children }: { label: string; id?: string; children: React.ReactNode }) {
+function Field({ label, id, description, children }: { label: string; id?: string; description?: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1.5">
       <label htmlFor={id} className="text-sm font-medium text-text-primary">{label}</label>
       {children}
+      {description && <p className="text-xs text-text-secondary">{description}</p>}
     </div>
   );
 }
@@ -108,14 +109,111 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
 
   // Load auth status once on mount
   useEffect(() => {
-    void ipc.upload.getAuthStatus().then(setAuthStatus).catch(() => {});
+    void ipc.upload.getAuthStatus().then(setAuthStatus).catch(() => { });
   }, []);
+
+  const [tgOtpModal, setTgOtpModal] = useState(false);
+  const [tgPhoneCodeHash, setTgPhoneCodeHash] = useState('');
+  const [tgTempSession, setTgTempSession] = useState('');
+  const [tgOtpCode, setTgOtpCode] = useState('');
+  const [tg2faPassword, setTg2faPassword] = useState('');
+  const [tgConnecting, setTgConnecting] = useState(false);
+
+  const handleSendTgCode = async () => {
+    if (!form.telegramApiId || !form.telegramApiHash || !form.telegramPhone) {
+      onError('Lengkapi API ID, API Hash, dan Nomor HP terlebih dahulu.');
+      return;
+    }
+    setTgConnecting(true);
+    try {
+      const res = await ipc.telegram.sendCode({
+        apiId: Number(form.telegramApiId),
+        apiHash: form.telegramApiHash,
+        phoneNumber: form.telegramPhone,
+      });
+      setTgPhoneCodeHash(res.phoneCodeHash);
+      setTgTempSession(res.tempSession);
+      setTgOtpModal(true);
+    } catch (err: any) {
+      onError(err.message || 'Gagal mengirim kode OTP Telegram.');
+    } finally {
+      setTgConnecting(false);
+    }
+  };
+
+  const handleVerifyTgOtp = async () => {
+    if (!tgOtpCode) return;
+    setTgConnecting(true);
+    try {
+      const sessionString = await ipc.telegram.signIn({
+        apiId: Number(form.telegramApiId),
+        apiHash: form.telegramApiHash!,
+        phoneNumber: form.telegramPhone!,
+        phoneCodeHash: tgPhoneCodeHash,
+        phoneCode: tgOtpCode,
+        tempSession: tgTempSession,
+        password: tg2faPassword || undefined,
+      });
+      set('telegramSession', sessionString);
+      setTgOtpModal(false);
+      onSaved();
+    } catch (err: any) {
+      onError(err.message || 'Gagal memverifikasi OTP Telegram.');
+    } finally {
+      setTgConnecting(false);
+    }
+  };
+
+  const [accounts, setAccounts] = useState<import('../../../shared/types').UploadAccount[]>([]);
+  const [showAddAccountModal, setShowAddAccountModal] = useState<null | 'tiktok' | 'facebook' | 'telegram'>(null);
+  const [accNameInput, setAccNameInput] = useState('');
+  const [accField1Input, setAccField1Input] = useState('');
+  const [accField2Input, setAccField2Input] = useState('');
+
+  useEffect(() => {
+    ipc.accounts.get().then((list) => {
+      if (Array.isArray(list)) setAccounts(list);
+    }).catch(() => { });
+  }, []);
+
+  const handleAddAccountSubmit = async () => {
+    if (!showAddAccountModal || !accNameInput.trim()) return;
+    const newAcc: import('../../../shared/types').UploadAccount = {
+      id: `acc_${Date.now()}`,
+      platform: showAddAccountModal,
+      name: accNameInput.trim(),
+      createdAt: Date.now(),
+    };
+    if (showAddAccountModal === 'tiktok') {
+      newAcc.tiktokSessionId = accField1Input.trim();
+    } else if (showAddAccountModal === 'facebook') {
+      newAcc.facebookPageId = accField1Input.trim();
+      newAcc.facebookAccessToken = accField2Input.trim();
+    } else if (showAddAccountModal === 'telegram') {
+      newAcc.telegramBotToken = accField1Input.trim();
+      newAcc.telegramChatId = accField2Input.trim();
+    }
+    const updated = [...accounts, newAcc];
+    setAccounts(updated);
+    await ipc.accounts.save(updated);
+    setShowAddAccountModal(null);
+    setAccNameInput('');
+    setAccField1Input('');
+    setAccField2Input('');
+  };
+
+  const handleDeleteAccount = async (id: string) => {
+    const updated = accounts.filter((a) => a.id !== id);
+    setAccounts(updated);
+    await ipc.accounts.save(updated);
+  };
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
     try {
       await ipc.settings.set(form);
+      await ipc.accounts.save(accounts);
       onSaved();
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Failed to save settings.');
@@ -133,8 +231,20 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
       await ipc.upload.startAuth();
       const status = await ipc.upload.getAuthStatus();
       setAuthStatus(status);
+      const list = await ipc.accounts.get();
+      if (Array.isArray(list)) setAccounts(list);
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Authentication failed.');
+    }
+  };
+
+  const handleDisconnect = async () => {
+    try {
+      await ipc.upload.disconnectAuth();
+      const status = await ipc.upload.getAuthStatus();
+      setAuthStatus(status);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Disconnect failed.');
     }
   };
 
@@ -154,7 +264,7 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
 
       {/* ── AI Models ── */}
       <div>
-        <SectionHeader title="AI Models" />
+        <SectionHeader title="Models" />
         <div className="flex flex-col gap-4">
           <Field label="Whisper Model Size" id="setting-whisper-model">
             <SegmentedControl
@@ -165,11 +275,11 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
               onChange={(v) => set('whisperModelSize', v as WhisperModelSize)}
             />
             <p className="text-[10px] text-text-secondary mt-1">
-              {form.whisperModelSize === 'tiny'   && '⚡ Fastest — ~1 min/10 min video. Lower accuracy.'}
-              {form.whisperModelSize === 'base'   && '⚡ Fast — ~2 min/10 min video. Good accuracy.'}
-              {form.whisperModelSize === 'small'  && '⚖ Balanced — ~4 min/10 min video.'}
+              {form.whisperModelSize === 'tiny' && '⚡ Fastest — ~1 min/10 min video. Lower accuracy.'}
+              {form.whisperModelSize === 'base' && '⚡ Fast — ~2 min/10 min video. Good accuracy.'}
+              {form.whisperModelSize === 'small' && '⚖ Balanced — ~4 min/10 min video.'}
               {form.whisperModelSize === 'medium' && '🐢 Slow on CPU — ~10 min/10 min video. High accuracy.'}
-              {form.whisperModelSize === 'large'  && '🐢 Very slow on CPU — ~20+ min/10 min video. Best accuracy.'}
+              {form.whisperModelSize === 'large' && '🐢 Very slow on CPU — ~20+ min/10 min video. Best accuracy.'}
             </p>
           </Field>
           <Field label="Ollama Model" id="setting-ollama-model">
@@ -207,15 +317,43 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
       {/* ── Video ── */}
       <div>
         <SectionHeader title="Video" />
-        <Field label="Default Download Quality" id="setting-video-quality">
-          <SegmentedControl
-            id="setting-video-quality"
-            aria-label="Default video quality"
-            options={QUALITY_OPTS}
-            value={form.defaultVideoQuality}
-            onChange={(v) => set('defaultVideoQuality', v as AppSettings['defaultVideoQuality'])}
-          />
-        </Field>
+        <div className="flex flex-col gap-4">
+          <Field label="Default Download Quality" id="setting-video-quality">
+            <SegmentedControl
+              id="setting-video-quality"
+              aria-label="Default video quality"
+              options={QUALITY_OPTS}
+              value={form.defaultVideoQuality}
+              onChange={(v) => set('defaultVideoQuality', v as AppSettings['defaultVideoQuality'])}
+            />
+          </Field>
+
+          <Field label="YouTube Cookie Source" id="setting-cookies-browser">
+            <select
+              id="setting-cookies-browser"
+              value={form.ytDlpCookiesBrowser ?? ''}
+              onChange={(e) => set('ytDlpCookiesBrowser', e.target.value)}
+              className={cn(
+                'rounded-md border border-border bg-background px-3 py-2 text-sm text-text-primary',
+                'focus:outline-none focus:ring-2 focus:ring-accent transition-micro'
+              )}
+            >
+              <option value="">Disabled (no cookies)</option>
+              <option value="chrome">Chrome</option>
+              <option value="firefox">Firefox</option>
+              <option value="edge">Microsoft Edge</option>
+              <option value="brave">Brave</option>
+              <option value="opera">Opera</option>
+              <option value="chromium">Chromium</option>
+              <option value="safari">Safari (macOS only)</option>
+            </select>
+            <p className="text-[10px] text-text-secondary mt-1">
+              If YouTube shows a "Sign in to confirm you&apos;re not a bot" error, select the browser
+              where you are logged into YouTube. yt-dlp will read cookies from that browser automatically.
+              The browser must be <strong>closed</strong> or have the tab available when downloading.
+            </p>
+          </Field>
+        </div>
       </div>
 
       {/* ── Translation ── */}
@@ -252,8 +390,8 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
           <Field label="DeepL API Key" id="setting-deepl-key">
             <TextInput
               id="setting-deepl-key"
-              value={(form as AppSettings & { deeplApiKey?: string }).deeplApiKey ?? ''}
-              onChange={(v) => set('deeplApiKey' as keyof AppSettings, v as never)}
+              value={form.deeplApiKey ?? ''}
+              onChange={(v) => set('deeplApiKey', v)}
               placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx (free) or pro key"
             />
             <p className="text-[10px] text-text-secondary mt-1">
@@ -267,8 +405,8 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
           <Field label="Google Cloud TTS API Key" id="setting-google-tts-key">
             <TextInput
               id="setting-google-tts-key"
-              value={(form as AppSettings & { googleTtsApiKey?: string }).googleTtsApiKey ?? ''}
-              onChange={(v) => set('googleTtsApiKey' as keyof AppSettings, v as never)}
+              value={form.googleTtsApiKey ?? ''}
+              onChange={(v) => set('googleTtsApiKey', v)}
               placeholder="AIza..."
             />
             <p className="text-[10px] text-text-secondary mt-1">
@@ -283,8 +421,8 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
           <Field label="Deepgram API Key" id="setting-deepgram-key">
             <TextInput
               id="setting-deepgram-key"
-              value={(form as AppSettings & { deepgramApiKey?: string }).deepgramApiKey ?? ''}
-              onChange={(v) => set('deepgramApiKey' as keyof AppSettings, v as never)}
+              value={form.deepgramApiKey ?? ''}
+              onChange={(v) => set('deepgramApiKey', v)}
               placeholder="Token xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
             />
             <p className="text-[10px] text-text-secondary mt-1">
@@ -299,8 +437,8 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
             <div className="flex gap-2">
               <TextInput
                 id="setting-google-stt-sa"
-                value={(form as AppSettings & { googleSttServiceAccountPath?: string }).googleSttServiceAccountPath ?? ''}
-                onChange={(v) => set('googleSttServiceAccountPath' as keyof AppSettings, v as never)}
+                value={form.googleSttServiceAccountPath ?? ''}
+                onChange={(v) => set('googleSttServiceAccountPath', v)}
                 placeholder="C:\path\to\service-account.json"
               />
               <button
@@ -308,12 +446,12 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
                 onClick={async () => {
                   try {
                     const filePath = await ipc.dialog.openFile();
-                    if (filePath) set('googleSttServiceAccountPath' as keyof AppSettings, filePath as never);
+                    if (filePath) set('googleSttServiceAccountPath', filePath);
                   } catch { /* cancelled */ }
                 }}
-                className="shrink-0 rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-medium hover:bg-surface-hover transition-micro"
+                className="rounded-md border border-border px-3 py-2 text-sm text-text-secondary hover:border-accent/40 hover:text-text-primary transition-micro"
               >
-                Browse
+                Browse JSON…
               </button>
             </div>
             <p className="text-[10px] text-text-secondary mt-1">
@@ -327,22 +465,49 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
             </p>
           </Field>
 
-          <Field label="Gemini API Key (Hook Detection)" id="setting-gemini-key">
-            <TextInput
-              id="setting-gemini-key"
-              value={(form as AppSettings & { geminiApiKey?: string }).geminiApiKey ?? ''}
-              onChange={(v) => set('geminiApiKey' as keyof AppSettings, v as never)}
-              placeholder="AQ.Ab8... or AIzaSy..."
-            />
-            <p className="text-[10px] text-text-secondary mt-1">
-              Gemini 2.5 Flash — fast &amp; accurate hook/segment detection (replaces Ollama). Get key at{' '}
-              <a href="https://aistudio.google.com/apikey"
-                target="_blank" rel="noopener noreferrer" className="text-accent underline">
-                AI Studio
-              </a>{' '}or use Vertex AI Express key.
-              Priority: Gemini → Ollama.
-            </p>
-          </Field>
+          {/* ── Google Colab XTTS Voice Clone ── */}
+          <div className="pt-2 border-t border-border mt-2">
+            <Field label="Google Colab XTTS Voice Clone Server URL" id="setting-xtts-colab-url">
+              <TextInput
+                id="setting-xtts-colab-url"
+                value={form.xttsColabUrl ?? ''}
+                onChange={(v) => set('xttsColabUrl', v)}
+                placeholder="https://xxxx.ngrok-free.app or https://xxxx.loca.lt"
+              />
+              <p className="text-[10px] text-text-secondary mt-1">
+                Run the 1-click Colab Notebook on free Google Colab T4 GPU to clone your own voice! Notebook template available in{' '}
+                <code>resources/voice_clone_colab.ipynb</code>.
+              </p>
+            </Field>
+
+            <div className="mt-3">
+              <Field label="Reference Speaker Voice Sample (.mp3/.wav)" id="setting-speaker-audio-path">
+                <div className="flex gap-2">
+                  <TextInput
+                    id="setting-speaker-audio-path"
+                    value={form.speakerAudioPath ?? ''}
+                    onChange={(v) => set('speakerAudioPath', v)}
+                    placeholder="C:\path\to\my_voice_sample.mp3"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const file = await ipc.dialog.openFile();
+                        if (file) set('speakerAudioPath', file);
+                      } catch {}
+                    }}
+                    className="rounded-md border border-border px-3 py-2 text-sm text-text-secondary hover:border-accent/40 hover:text-text-primary transition-micro"
+                  >
+                    Choose Sample
+                  </button>
+                </div>
+                <p className="text-[10px] text-text-secondary mt-1">
+                  Upload a 15–30 second audio recording of your voice. The AI will speak using your exact voice timber and accent!
+                </p>
+              </Field>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -456,29 +621,40 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
       <div>
         <SectionHeader title="YouTube Account" />
         <div className="flex flex-col gap-3">
-          <div className="flex items-center justify-between rounded-md border border-border bg-background px-4 py-3">
-            <div>
-              <p className="text-sm font-medium text-text-primary">
-                {authStatus?.authenticated ? 'Connected' : 'Not connected'}
-              </p>
-              {authStatus?.email && (
-                <p className="text-xs text-text-secondary">{authStatus.email}</p>
-              )}
+          {/* Multi YouTube Accounts Card */}
+          <div className="flex flex-col gap-2 rounded-md border border-border p-3 bg-surface/30">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-text-primary">Daftar Akun YouTube Terhubung ({accounts.filter(a => a.platform === 'youtube').length})</span>
+              <button
+                type="button"
+                id="youtube-auth-btn"
+                onClick={() => void handleConnect()}
+                className="rounded bg-accent/20 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/30 transition-micro"
+              >
+                + Hubungkan Akun YouTube Baru
+              </button>
             </div>
-            <button
-              type="button"
-              id="youtube-auth-btn"
-              onClick={() => void handleConnect()}
-              className={cn(
-                'rounded-md border px-3 py-1.5 text-xs font-medium transition-micro',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
-                authStatus?.authenticated
-                  ? 'border-destructive/40 text-destructive hover:bg-destructive/10'
-                  : 'border-accent/40 text-accent hover:bg-accent/10'
-              )}
-            >
-              {authStatus?.authenticated ? 'Disconnect' : 'Connect'}
-            </button>
+            {accounts.filter(a => a.platform === 'youtube').length === 0 ? (
+              <p className="text-xs text-text-secondary py-1.5">Belum ada akun YouTube terhubung.</p>
+            ) : (
+              accounts.filter(a => a.platform === 'youtube').map((acc) => (
+                <div key={acc.id} className="flex items-center justify-between rounded border border-border/60 bg-background px-3 py-1.5 text-xs">
+                  <div className="flex flex-col">
+                    <span className="font-medium text-text-primary">{acc.name}</span>
+                    {acc.youtubeTokens?.email && (
+                      <span className="text-[10px] text-text-secondary">{acc.youtubeTokens.email}</span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteAccount(acc.id)}
+                    className="text-[10px] text-destructive hover:underline"
+                  >
+                    Hapus
+                  </button>
+                </div>
+              ))
+            )}
           </div>
           <div className="flex flex-col gap-3">
             <Field label="YouTube Client ID" id="setting-yt-client-id">
@@ -489,7 +665,188 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
               <TextInput id="setting-yt-client-secret" value={form.youtubeClientSecret}
                 onChange={(v) => set('youtubeClientSecret', v)} placeholder="OAuth 2.0 Client Secret" />
             </Field>
+            <Field label="YouTube Data API Key" id="setting-yt-api-key">
+              <TextInput id="setting-yt-api-key"
+                value={form.youtubeApiKey ?? ''}
+                onChange={(v) => set('youtubeApiKey', v)}
+                placeholder="AIza... (untuk Search & Trending di Dashboard)" />
+            </Field>
           </div>
+        </div>
+      </div>
+
+      {/* ── TikTok Account ── */}
+      <div>
+        <SectionHeader title="TikTok Account" />
+        <div className="flex flex-col gap-3">
+          <Field label="TikTok Cookies / Session ID" id="setting-tiktok-session">
+            <TextInput id="setting-tiktok-session" value={form.tiktokSessionId ?? ''}
+              onChange={(v) => set('tiktokSessionId', v)} placeholder="Salin Cookie string lengkap dari Browser Anda" />
+            <p className="text-[10px] text-text-secondary mt-1 leading-relaxed">
+              Buka <code>tiktok.com/tiktokstudio</code> di browser utama Anda, tekan <strong>F12</strong>, masuk ke tab <strong>Network</strong>, reload halaman, klik salah satu request, salin nilai <strong>Cookie</strong> yang ada di bagian <strong>Request Headers</strong> lalu tempel di sini.
+            </p>
+          </Field>
+
+          {/* Saved Multi TikTok Accounts */}
+          <div className="flex flex-col gap-2 rounded-md border border-border p-3 bg-surface/30">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-text-primary">Daftar Akun TikTok Terhubung ({accounts.filter(a => a.platform === 'tiktok').length})</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddAccountModal('tiktok');
+                  setAccNameInput('');
+                  setAccField1Input('');
+                }}
+                className="rounded bg-accent/20 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/30 transition-micro"
+              >
+                + Tambah Akun TikTok
+              </button>
+            </div>
+            {accounts.filter(a => a.platform === 'tiktok').map((acc) => (
+              <div key={acc.id} className="flex items-center justify-between rounded border border-border/60 bg-background px-3 py-1.5 text-xs">
+                <span className="font-medium text-text-primary">{acc.name}</span>
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteAccount(acc.id)}
+                  className="text-[10px] text-destructive hover:underline"
+                >
+                  Hapus
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Facebook Fanpage Account ── */}
+      <div>
+        <SectionHeader title="Facebook Fanpage Account" />
+        <div className="flex flex-col gap-3">
+          <Field label="Facebook Page ID" id="setting-fb-page-id">
+            <TextInput id="setting-fb-page-id" value={form.facebookPageId ?? ''}
+              onChange={(v) => set('facebookPageId', v)} placeholder="Facebook Page ID" />
+          </Field>
+          <Field label="Facebook Page Access Token" id="setting-fb-token">
+            <TextInput id="setting-fb-token" value={form.facebookAccessToken ?? ''}
+              onChange={(v) => set('facebookAccessToken', v)} placeholder="Facebook Page Access Token" />
+          </Field>
+
+          {/* Saved Multi Facebook Accounts */}
+          <div className="flex flex-col gap-2 rounded-md border border-border p-3 bg-surface/30">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-text-primary">Daftar Halaman Facebook Terhubung ({accounts.filter(a => a.platform === 'facebook').length})</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddAccountModal('facebook');
+                  setAccNameInput('');
+                  setAccField1Input('');
+                  setAccField2Input('');
+                }}
+                className="rounded bg-accent/20 px-2.5 py-1 text-[11px] font-semibold text-accent hover:bg-accent/30 transition-micro"
+              >
+                + Tambah Halaman Facebook
+              </button>
+            </div>
+            {accounts.filter(a => a.platform === 'facebook').map((acc) => (
+              <div key={acc.id} className="flex items-center justify-between rounded border border-border/60 bg-background px-3 py-1.5 text-xs">
+                <div className="flex flex-col">
+                  <span className="font-medium text-text-primary">{acc.name}</span>
+                  <span className="text-[10px] text-text-secondary">Page ID: {acc.facebookPageId}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteAccount(acc.id)}
+                  className="text-[10px] text-destructive hover:underline"
+                >
+                  Hapus
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Telegram Integration Settings ── */}
+      <div>
+        <SectionHeader title="Telegram Integration Settings" />
+        <div className="flex flex-col gap-4">
+          <Field label="Metode Pengiriman Telegram" id="setting-tg-mode">
+            <div className="flex gap-4">
+              <label className="flex items-center gap-2 text-xs font-medium cursor-pointer">
+                <input
+                  type="radio"
+                  name="tg-mode"
+                  checked={!form.telegramUseUserbot}
+                  onChange={() => set('telegramUseUserbot', false)}
+                  className="accent-accent"
+                />
+                <span>Telegram Bot API (Batas 50 MB)</span>
+              </label>
+              <label className="flex items-center gap-2 text-xs font-medium cursor-pointer">
+                <input
+                  type="radio"
+                  name="tg-mode"
+                  checked={!!form.telegramUseUserbot}
+                  onChange={() => set('telegramUseUserbot', true)}
+                  className="accent-accent"
+                />
+                <span>Akun Telegram Pribadi / MTProto (Batas 2 GB - 0% Kompresi)</span>
+              </label>
+            </div>
+          </Field>
+
+          {!form.telegramUseUserbot ? (
+            <>
+              <Field label="Telegram Bot Token" id="setting-tg-bot-token">
+                <TextInput id="setting-tg-bot-token" value={form.telegramBotToken ?? ''}
+                  onChange={(v) => set('telegramBotToken', v)} placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ" />
+              </Field>
+              <Field label="Telegram Chat ID" id="setting-tg-chat-id">
+                <TextInput id="setting-tg-chat-id" value={form.telegramChatId ?? ''}
+                  onChange={(v) => set('telegramChatId', v)} placeholder="e.g. 123456789 or @channelname" />
+              </Field>
+              <Field label="Telegram API Server URL" id="setting-tg-api-server" description="Default: https://api.telegram.org (Batas 50 MB). Ubah ke server lokal (misal: http://localhost:8081) untuk unlock batas 2 GB tanpa kompresi.">
+                <TextInput id="setting-tg-api-server" value={form.telegramApiServer ?? 'https://api.telegram.org'}
+                  onChange={(v) => set('telegramApiServer', v)} placeholder="https://api.telegram.org atau http://localhost:8081" />
+              </Field>
+            </>
+          ) : (
+            <div className="rounded-md border border-border p-4 bg-surface/40 flex flex-col gap-3">
+              <div className="flex items-center justify-between border-b border-border/50 pb-2">
+                <span className="text-xs font-semibold text-text-primary">Status Akun Telegram Pribadi</span>
+                <span className={cn('text-xs px-2.5 py-0.5 rounded font-semibold', form.telegramSession ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400')}>
+                  {form.telegramSession ? 'Terhubung (Connected)' : 'Belum Terhubung'}
+                </span>
+              </div>
+              <Field label="Telegram API ID" id="setting-tg-api-id" description="Dapatkan App api_id dari https://my.telegram.org">
+                <TextInput id="setting-tg-api-id" value={form.telegramApiId ? String(form.telegramApiId) : ''}
+                  onChange={(v) => set('telegramApiId', Number(v) || 0)} placeholder="Contoh: 1234567" />
+              </Field>
+              <Field label="Telegram API Hash" id="setting-tg-api-hash" description="Dapatkan App api_hash dari https://my.telegram.org">
+                <TextInput id="setting-tg-api-hash" value={form.telegramApiHash ?? ''}
+                  onChange={(v) => set('telegramApiHash', v)} placeholder="Contoh: 0123456789abcdef0123456789abcdef" />
+              </Field>
+              <Field label="Nomor HP Telegram" id="setting-tg-phone" description="Nomor telepon terdaftar Telegram (sertakan kode negara, misal: +628123456789)">
+                <TextInput id="setting-tg-phone" value={form.telegramPhone ?? ''}
+                  onChange={(v) => set('telegramPhone', v)} placeholder="+628123456789" />
+              </Field>
+              <Field label="Target Chat ID / Username" id="setting-tg-target" description="Isi 'me' untuk mengirim langsung ke Saved Messages (Pesan Tersimpan), atau isi ID chat/channel target.">
+                <TextInput id="setting-tg-target" value={form.telegramChatId || 'me'}
+                  onChange={(v) => set('telegramChatId', v)} placeholder="me" />
+              </Field>
+
+              <button
+                type="button"
+                onClick={() => void handleSendTgCode()}
+                disabled={tgConnecting}
+                className="self-start mt-2 rounded bg-accent px-4 py-2 text-xs font-semibold text-accent-foreground hover:bg-accent-hover disabled:opacity-50"
+              >
+                {tgConnecting ? 'Mengirim Kode OTP…' : form.telegramSession ? 'Hubungkan Ulang Akun' : 'Hubungkan Akun Telegram (OTP)'}
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -507,6 +864,136 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
       >
         {saving ? 'Saving…' : 'Save Settings'}
       </button>
+
+      {/* OTP Verification Modal */}
+      {tgOtpModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+          <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-6 flex flex-col gap-4 shadow-xl">
+            <h4 className="text-sm font-semibold text-text-primary">Verifikasi Kode OTP Telegram</h4>
+            <p className="text-xs text-text-secondary">Masukkan kode verifikasi yang baru saja dikirimkan ke aplikasi Telegram Anda.</p>
+            <TextInput
+              id="otp-code-input"
+              value={tgOtpCode}
+              onChange={setTgOtpCode}
+              placeholder="Kode OTP (contoh: 12345)"
+            />
+            <TextInput
+              id="2fa-password-input"
+              value={tg2faPassword}
+              onChange={setTg2faPassword}
+              placeholder="Password 2FA (opsional jika aktif)"
+            />
+            <div className="flex justify-end gap-2 mt-2">
+              <button
+                type="button"
+                onClick={() => setTgOtpModal(false)}
+                className="rounded border border-border px-3 py-1.5 text-xs font-medium text-text-secondary hover:text-text-primary"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleVerifyTgOtp()}
+                disabled={tgConnecting || !tgOtpCode}
+                className="rounded bg-accent px-4 py-1.5 text-xs font-semibold text-accent-foreground hover:bg-accent-hover disabled:opacity-50"
+              >
+                {tgConnecting ? 'Verifikasi…' : 'Verifikasi & Simpan'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Account Modal */}
+      {showAddAccountModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-4">
+          <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 flex flex-col gap-4 shadow-xl">
+            <h4 className="text-sm font-semibold text-text-primary uppercase tracking-wide">
+              + Tambah Akun {showAddAccountModal.toUpperCase()}
+            </h4>
+
+            <Field label="Nama Profil Akun" id="add-acc-name" description="Contoh: Akun Utama, Akun Gaming 2, Channel Shorts B">
+              <TextInput
+                id="add-acc-name"
+                value={accNameInput}
+                onChange={setAccNameInput}
+                placeholder="Nama Akun"
+              />
+            </Field>
+
+            {showAddAccountModal === 'tiktok' && (
+              <Field label="TikTok Cookie / Session ID" id="add-acc-field1">
+                <TextInput
+                  id="add-acc-field1"
+                  value={accField1Input}
+                  onChange={setAccField1Input}
+                  placeholder="sessionid=..."
+                />
+              </Field>
+            )}
+
+            {showAddAccountModal === 'facebook' && (
+              <>
+                <Field label="Facebook Page ID" id="add-acc-field1">
+                  <TextInput
+                    id="add-acc-field1"
+                    value={accField1Input}
+                    onChange={setAccField1Input}
+                    placeholder="Facebook Page ID"
+                  />
+                </Field>
+                <Field label="Facebook Page Access Token" id="add-acc-field2">
+                  <TextInput
+                    id="add-acc-field2"
+                    value={accField2Input}
+                    onChange={setAccField2Input}
+                    placeholder="Page Access Token"
+                  />
+                </Field>
+              </>
+            )}
+
+            {showAddAccountModal === 'telegram' && (
+              <>
+                <Field label="Telegram Bot Token" id="add-acc-field1">
+                  <TextInput
+                    id="add-acc-field1"
+                    value={accField1Input}
+                    onChange={setAccField1Input}
+                    placeholder="123456:ABC..."
+                  />
+                </Field>
+                <Field label="Telegram Chat ID" id="add-acc-field2">
+                  <TextInput
+                    id="add-acc-field2"
+                    value={accField2Input}
+                    onChange={setAccField2Input}
+                    placeholder="Chat ID atau @channelname"
+                  />
+                </Field>
+              </>
+            )}
+
+            <div className="flex justify-end gap-2 mt-2">
+              <button
+                type="button"
+                onClick={() => setShowAddAccountModal(null)}
+                className="rounded border border-border px-3 py-1.5 text-xs font-medium text-text-secondary hover:text-text-primary"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleAddAccountSubmit()}
+                disabled={!accNameInput.trim()}
+                className="rounded bg-accent px-4 py-1.5 text-xs font-semibold text-accent-foreground hover:bg-accent-hover disabled:opacity-50"
+              >
+                Simpan Akun
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </form>
   );
 }

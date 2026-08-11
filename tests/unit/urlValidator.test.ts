@@ -220,4 +220,20 @@ describe('validateYouTubeUrl — edge cases', () => {
     const result = validateYouTubeUrl('https://youtube.com.evil.com/watch?v=dQw4w9WgXcQ');
     expect(result.valid).toBe(false);
   });
+
+  it('accepts TikTok URLs', () => {
+    const res1 = validateYouTubeUrl('https://www.tiktok.com/@user/video/7123456789012345678');
+    expect(res1.valid).toBe(true);
+    const res2 = validateYouTubeUrl('https://vt.tiktok.com/ZSjxxxxxx/');
+    expect(res2.valid).toBe(true);
+  });
+
+  it('accepts RedNote / Xiaohongshu URLs', () => {
+    const res1 = validateYouTubeUrl('https://www.xiaohongshu.com/explore/6543210987');
+    expect(res1.valid).toBe(true);
+    const res2 = validateYouTubeUrl('https://xhslink.com/a/abcdef');
+    expect(res2.valid).toBe(true);
+    const res3 = validateYouTubeUrl('https://rednote.com/post/123456');
+    expect(res3.valid).toBe(true);
+  });
 });

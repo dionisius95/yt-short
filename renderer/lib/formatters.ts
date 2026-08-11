@@ -53,28 +53,37 @@ export function formatRelativeTime(timestampMs: number): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Formats a duration in milliseconds as a zero-padded "MM:SS" string.
+ * Formats a duration in milliseconds as a zero-padded "MM:SS.mmm" (or "MM:SS" if includeMs is false).
  *
  * @example
- * formatDuration(83000) // "01:23"
- * formatDuration(0)     // "00:00"
+ * formatDuration(83000)        // "01:23.000"
+ * formatDuration(83456)        // "01:23.456"
+ * formatDuration(83000, false) // "01:23"
+ * formatDuration(0)            // "00:00.000"
  */
-export function formatDuration(ms: number): string {
-  const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
+export function formatDuration(ms: number, includeMs = true): string {
+  const totalMs = Math.max(0, Math.round(ms));
+  const totalSeconds = Math.floor(totalMs / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  const millis = totalMs % 1000;
+  const base = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  if (includeMs) {
+    return `${base}.${String(millis).padStart(3, '0')}`;
+  }
+  return base;
 }
 
 /**
- * Alias for `formatDuration`. Formats a millisecond timestamp as "MM:SS".
- * Used for displaying hook start/end times on HookCards.
+ * Alias for `formatDuration`. Formats a millisecond timestamp as "MM:SS.mmm".
+ * Used for displaying hook start/end times on HookCards and TimelineScrubber.
  *
  * @example
- * formatMs(83000) // "01:23"
+ * formatMs(83000) // "01:23.000"
+ * formatMs(83456) // "01:23.456"
  */
-export function formatMs(ms: number): string {
-  return formatDuration(ms);
+export function formatMs(ms: number, includeMs = true): string {
+  return formatDuration(ms, includeMs);
 }
 
 // ---------------------------------------------------------------------------

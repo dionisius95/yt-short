@@ -27,6 +27,15 @@ export function initDatabase(dbPath: string): Database.Database {
   const schemaSql = fs.readFileSync(schemaPath, 'utf-8');
   db.exec(schemaSql);
 
+  // Migration: add original_words_json + original_language columns (v0.1.1)
+  // ALTER TABLE ADD COLUMN is a no-op if the column already exists → safe to re-run.
+  try { db.exec('ALTER TABLE transcripts ADD COLUMN original_words_json TEXT'); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE transcripts ADD COLUMN original_language TEXT'); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE clips ADD COLUMN options_json TEXT'); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE clips ADD COLUMN tiktok_url TEXT'); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE clips ADD COLUMN facebook_url TEXT'); } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE clips ADD COLUMN telegram_url TEXT'); } catch { /* already exists */ }
+
   _db = db;
   return db;
 }

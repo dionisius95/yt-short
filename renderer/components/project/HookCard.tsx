@@ -28,7 +28,7 @@ export function HookCard({ hook, projectDurationMs, isSelected, onSelect, onDism
   const [endMs, setEndMs] = useState(hook.endMs);
   const [generating, setGenerating] = useState(false);
 
-  const durationSec = Math.round((endMs - startMs) / 1000);
+  const durationSec = ((endMs - startMs) / 1000).toFixed(3);
 
   // Viral score color
   const scoreColor =

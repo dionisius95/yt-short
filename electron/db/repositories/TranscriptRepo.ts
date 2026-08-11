@@ -13,6 +13,8 @@ export interface TranscriptRow {
   wordsJson: string;
   isEmpty: boolean;
   createdAt: number;
+  originalWordsJson: string | null;
+  originalLanguage: string | null;
 }
 
 type InsertInput = {
@@ -53,7 +55,8 @@ export class TranscriptRepo {
   findByProjectId(projectId: string): TranscriptRow | null {
     const row = this.db
       .prepare<[string]>(`
-        SELECT id, project_id, language, words_json, is_empty, created_at
+        SELECT id, project_id, language, words_json, is_empty, created_at,
+               original_words_json, original_language
         FROM transcripts
         WHERE project_id = ?
       `)
@@ -65,7 +68,7 @@ export class TranscriptRepo {
   /**
    * Partially update a transcript row by its id.
    */
-  update(id: string, data: { wordsJson?: string; isEmpty?: boolean; language?: string }): void {
+  update(id: string, data: { wordsJson?: string; isEmpty?: boolean; language?: string; originalWordsJson?: string | null; originalLanguage?: string | null }): void {
     const setClauses: string[] = [];
     const values: unknown[] = [];
 
@@ -80,6 +83,14 @@ export class TranscriptRepo {
     if (data.language !== undefined) {
       setClauses.push('language = ?');
       values.push(data.language);
+    }
+    if (data.originalWordsJson !== undefined) {
+      setClauses.push('original_words_json = ?');
+      values.push(data.originalWordsJson);
+    }
+    if (data.originalLanguage !== undefined) {
+      setClauses.push('original_language = ?');
+      values.push(data.originalLanguage);
     }
 
     if (setClauses.length === 0) return;
@@ -100,8 +111,10 @@ interface RawTranscript {
   project_id: string;
   language: string;
   words_json: string;
-  is_empty: number; // SQLite stores booleans as 0/1
+  is_empty: number;
   created_at: number;
+  original_words_json: string | null;
+  original_language: string | null;
 }
 
 function mapRow(r: RawTranscript): TranscriptRow {
@@ -112,5 +125,7 @@ function mapRow(r: RawTranscript): TranscriptRow {
     wordsJson: r.words_json,
     isEmpty: r.is_empty !== 0,
     createdAt: r.created_at,
+    originalWordsJson: r.original_words_json,
+    originalLanguage: r.original_language,
   };
 }

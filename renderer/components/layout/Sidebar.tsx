@@ -52,9 +52,9 @@ function SettingsIcon() {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { href: '/',         label: 'Dashboard', icon: <HomeIcon />,     ariaLabel: 'Navigate to Dashboard' },
-  { href: '/import',   label: 'Import',    icon: <ImportIcon />,   ariaLabel: 'Navigate to Import' },
-  { href: '/settings', label: 'Settings',  icon: <SettingsIcon />, ariaLabel: 'Navigate to Settings' },
+  { href: '/',         label: 'Project Bin',   icon: <HomeIcon />,     ariaLabel: 'Navigate to Project Bin' },
+  { href: '/import',   label: 'Import Media',  icon: <ImportIcon />,   ariaLabel: 'Navigate to Import Media' },
+  { href: '/settings', label: 'Preferences',   icon: <SettingsIcon />, ariaLabel: 'Navigate to Preferences' },
 ];
 
 // ---------------------------------------------------------------------------
@@ -65,16 +65,15 @@ function Wordmark() {
   return (
     <div className="px-5 py-5 border-b border-border">
       <div className="flex items-center gap-2.5">
-        {/* Gradient logo mark */}
-        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-gradient-to-br from-accent to-[#8B5CF6] shadow-lg">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"
-            className="text-white" aria-hidden="true">
-            <polygon points="5 3 19 12 5 21 5 3"/>
-          </svg>
-        </div>
+        {/* Logo mark */}
+        <img
+          src="/logo.png"
+          alt="Logo"
+          className="h-7 w-7 rounded-md object-contain shadow-md"
+        />
         <div className="flex flex-col leading-none">
-          <span className="text-xs font-semibold text-text-primary tracking-wide">AI Shorts</span>
-          <span className="text-[10px] text-text-secondary">Generator</span>
+          <span className="text-xs font-semibold text-text-primary tracking-wide">Shorts</span>
+          <span className="text-[10px] text-text-secondary">Editor</span>
         </div>
       </div>
     </div>
@@ -95,7 +94,7 @@ export function Sidebar() {
 
   return (
     <aside
-      className="flex h-full w-[240px] flex-col border-r border-border bg-surface"
+      className="flex h-full w-[160px] flex-col border-r border-border bg-surface"
       aria-label="Primary navigation"
     >
       <Wordmark />

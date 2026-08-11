@@ -21,45 +21,50 @@ import {
 // ---------------------------------------------------------------------------
 
 describe('formatDuration', () => {
-  it('formats zero milliseconds as "00:00"', () => {
-    expect(formatDuration(0)).toBe('00:00');
+  it('formats zero milliseconds as "00:00.000"', () => {
+    expect(formatDuration(0)).toBe('00:00.000');
   });
 
-  it('formats 1 second as "00:01"', () => {
-    expect(formatDuration(1_000)).toBe('00:01');
+  it('formats 1 second as "00:01.000"', () => {
+    expect(formatDuration(1_000)).toBe('00:01.000');
   });
 
-  it('formats 83 seconds (1 min 23 s) as "01:23"', () => {
-    expect(formatDuration(83_000)).toBe('01:23');
+  it('formats 83 seconds (1 min 23 s) as "01:23.000"', () => {
+    expect(formatDuration(83_000)).toBe('01:23.000');
   });
 
-  it('formats exactly 60 seconds as "01:00"', () => {
-    expect(formatDuration(60_000)).toBe('01:00');
+  it('formats exactly 60 seconds as "01:00.000"', () => {
+    expect(formatDuration(60_000)).toBe('01:00.000');
   });
 
-  it('formats 3661 seconds (61 min 1 s) as "61:01"', () => {
-    expect(formatDuration(3_661_000)).toBe('61:01');
+  it('formats 3661 seconds (61 min 1 s) as "61:01.000"', () => {
+    expect(formatDuration(3_661_000)).toBe('61:01.000');
   });
 
   it('pads single-digit seconds with a leading zero', () => {
-    expect(formatDuration(65_000)).toBe('01:05');
+    expect(formatDuration(65_000)).toBe('01:05.000');
   });
 
   it('treats negative values as zero', () => {
-    expect(formatDuration(-5_000)).toBe('00:00');
+    expect(formatDuration(-5_000)).toBe('00:00.000');
   });
 
-  it('truncates sub-second precision (does not round up)', () => {
-    // 1999 ms → 1 full second
-    expect(formatDuration(1_999)).toBe('00:01');
+  it('formats sub-second precision correctly', () => {
+    expect(formatDuration(1_999)).toBe('00:01.999');
+    expect(formatDuration(83_456)).toBe('01:23.456');
+  });
+
+  it('formats without milliseconds when includeMs is false', () => {
+    expect(formatDuration(83_456, false)).toBe('01:23');
   });
 });
 
 describe('formatMs', () => {
   it('is an alias for formatDuration', () => {
-    expect(formatMs(83_000)).toBe('01:23');
-    expect(formatMs(0)).toBe('00:00');
-    expect(formatMs(3_661_000)).toBe('61:01');
+    expect(formatMs(83_000)).toBe('01:23.000');
+    expect(formatMs(0)).toBe('00:00.000');
+    expect(formatMs(3_661_000)).toBe('61:01.000');
+    expect(formatMs(83_456, false)).toBe('01:23');
   });
 });
 

@@ -40,6 +40,9 @@ export const CHANNELS = {
   CLIP_LIST: 'clip:list',
   CLIP_GET: 'clip:get',
   CLIP_DELETE: 'clip:delete',
+  CLIP_UPDATE_SCRIPT: 'clip:update-script',
+  CLIP_UPDATE_CAPTION_VISIBILITY: 'clip:update-caption-visibility',
+  CLIP_SAVE_METADATA: 'clip:save-metadata',
   CLIP_PROGRESS: 'clip:progress',           // main → renderer (event)
 
   // ---------------------------------------------------------------------------
@@ -50,14 +53,24 @@ export const CHANNELS = {
   EXPORT_PROGRESS: 'export:progress',       // main → renderer (event)
 
   // ---------------------------------------------------------------------------
+  // AI Video Commentator
+  // ---------------------------------------------------------------------------
+  COMMENTATOR_GENERATE: 'commentator:generate',
+  COMMENTATOR_GET_VOICES: 'commentator:get-voices',
+  COMMENTATOR_PROGRESS: 'commentator:progress',       // main → renderer (event)
+
+  // ---------------------------------------------------------------------------
   // Upload (YouTube)
   // ---------------------------------------------------------------------------
   UPLOAD_AUTH_START: 'upload:auth:start',
+  UPLOAD_AUTH_DISCONNECT: 'upload:auth:disconnect',
   UPLOAD_AUTH_CALLBACK: 'upload:auth:callback',
   UPLOAD_AUTH_STATUS: 'upload:auth:status',
   UPLOAD_START: 'upload:start',
   UPLOAD_CANCEL: 'upload:cancel',
   UPLOAD_PROGRESS: 'upload:progress',       // main → renderer (event)
+  TELEGRAM_SEND_CODE: 'telegram:send-code',
+  TELEGRAM_SIGN_IN: 'telegram:sign-in',
 
   // ---------------------------------------------------------------------------
   // Projects
@@ -67,15 +80,31 @@ export const CHANNELS = {
   PROJECT_DELETE: 'project:delete',
 
   // ---------------------------------------------------------------------------
-  // Settings
+  // Settings & Presets / Accounts
   // ---------------------------------------------------------------------------
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
+  ACCOUNTS_GET: 'accounts:get',
+  ACCOUNTS_SAVE: 'accounts:save',
+  PRESETS_GET: 'presets:get',
+  PRESETS_SAVE: 'presets:save',
 
   // ---------------------------------------------------------------------------
   // Dependencies
   // ---------------------------------------------------------------------------
   DEPS_CHECK: 'deps:check',
+
+  // ---------------------------------------------------------------------------
+  // YouTube discovery (search / trending)
+  // ---------------------------------------------------------------------------
+  YOUTUBE_SEARCH: 'youtube:search',
+  YOUTUBE_TRENDING: 'youtube:trending',
+  YOUTUBE_ANALYZE_TREND: 'youtube:analyze-trend',
+  YOUTUBE_OPTIMIZE_GIST: 'youtube:optimize-gist',
+  CLIPCAFE_SEARCH: 'clipcafe:search',
+  CLIPCAFE_GENRE_MOVIES: 'clipcafe:genre-movies',
+  CLIPCAFE_MOVIE_CLIPS: 'clipcafe:movie-clips',
+
 
   // ---------------------------------------------------------------------------
   // Pipeline (orchestrated multi-stage)
@@ -89,6 +118,8 @@ export const CHANNELS = {
   // Thumbnail
   // ---------------------------------------------------------------------------
   THUMBNAIL_GENERATE: 'thumbnail:generate',
+  THUMBNAIL_SAVE_CUSTOM: 'thumbnail:save-custom',
+  THUMBNAIL_GENERATE_AI: 'thumbnail:generate-ai',
 
   // ---------------------------------------------------------------------------
   // Local import
@@ -108,7 +139,13 @@ export const CHANNELS = {
   FRAME_EXTRACT: 'frame:extract',       // extract single frame JPEG for subject picker
   TRACKING_DETECT: 'tracking:detect',   // run auto detection on a frame, return boxes
   TRANSLATE_START: 'translate:start',   // translate transcript to target language
+  TRANSLATE_RESET: 'translate:reset',   // reset transcript to original (pre-translation) words
   DUB_START: 'dub:start',               // generate dubbed video with TTS
+
+  // ---------------------------------------------------------------------------
+  // Preview render
+  // ---------------------------------------------------------------------------
+  PREVIEW_RENDER: 'preview:render',     // render 1 frame with full filter stack → base64 JPEG
 
   // ---------------------------------------------------------------------------
   // Shell / OS utilities
@@ -132,6 +169,7 @@ export const PUSH_CHANNELS = [
   CHANNELS.EXPORT_PROGRESS,
   CHANNELS.UPLOAD_PROGRESS,
   CHANNELS.PIPELINE_PROGRESS,
+  CHANNELS.COMMENTATOR_PROGRESS,
 ] as const;
 
 export type PushChannelName = (typeof PUSH_CHANNELS)[number];

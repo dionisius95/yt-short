@@ -57,7 +57,24 @@ export function validateYouTubeUrl(input: string): ValidationResult {
   const trimmed = input.trim();
 
   if (trimmed.length === 0) {
-    return { valid: false, reason: 'URL must not be empty.' };
+     return { valid: false, reason: 'URL must not be empty.' };
+  }
+
+  if (trimmed.toLowerCase().includes('clip.cafe/')) {
+    return { valid: true, videoId: 'clipcafe', format: 'watch' };
+  }
+
+  const lower = trimmed.toLowerCase();
+  if (lower.includes('tiktok.com/') || lower.includes('vt.tiktok.com/') || lower.includes('vm.tiktok.com/')) {
+    return { valid: true, videoId: 'tiktok', format: 'watch' };
+  }
+
+  if (
+    lower.includes('xiaohongshu.com/') ||
+    lower.includes('xhslink.com/') ||
+    lower.includes('rednote.com/')
+  ) {
+    return { valid: true, videoId: 'rednote', format: 'watch' };
   }
 
   // Check standard watch URL

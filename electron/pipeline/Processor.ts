@@ -13,7 +13,7 @@ import { BrowserWindow } from 'electron';
 import { CHANNELS } from '../ipc/channels';
 import { createLogger } from '../utils/logger';
 import { Tracker } from './Tracker';
-import type { TranscriptWord, SubtitleStyle, SubtitlePosition, CropFrame, CaptionStyle, CaptionPresetId, LogoOverlay, LayoutPreset, SplitLayout, GameRatio, GamePosition, LetterboxBackground, TitleOverlay, CommentatorTransitionEffect, AvatarConfig } from '../../shared/types';
+import type { TranscriptWord, SubtitleStyle, SubtitlePosition, CropFrame, CaptionStyle, CaptionPresetId, LogoOverlay, LayoutPreset, SplitLayout, GameRatio, GamePosition, LetterboxBackground, TitleOverlay, CommentatorTransitionEffect } from '../../shared/types';
 import { CAPTION_PRESETS } from '../../shared/types';
 
 const log = createLogger('Processor');
@@ -920,7 +920,7 @@ function buildLetterboxFilter(
   logo?: LogoOverlay,
   cropFilter?: string,
 ): { filterComplex: string; mapVideo: string; needsImageInput: boolean } {
-  const blurRadius = Math.max(5, Math.min(40, Math.round((bg.blurRadius ?? 30) * 0.8)));
+  const blurRadius = bg.blurRadius ?? 30;
   const color      = (bg.color ?? '#000000').replace('#', '');
   const cropMode   = bg.crop ?? 'original';
 
@@ -957,9 +957,9 @@ function buildLetterboxFilter(
   let fc = '';
   if (bg.type === 'blur') {
     const bgFilter =
-      `scale=1080:1920:force_original_aspect_ratio=increase:flags=bicubic,` +
+      `scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,` +
       `crop=1080:1920,` +
-      `boxblur=luma_radius=${blurRadius}:luma_power=3,` +
+      `gblur=sigma=${Math.min(blurRadius, 100)},` +
       `setsar=1`;
 
     fc =
@@ -1633,9 +1633,8 @@ export class Processor {
           '-filter_complex', filterComplex,
           '-map', '[vout]',
           '-map', replacementAudioIdx !== -1 ? `${replacementAudioIdx}:a` : '0:a?',
-          '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-threads', '4',
-          '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
-          '-max_muxing_queue_size', '1024',
+          '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
+          '-c:a', 'aac', '-b:a', '320k',
           '-movflags', '+faststart',
           outputPath,
         ];
@@ -1672,9 +1671,8 @@ export class Processor {
           '-filter_complex', filterComplex,
           '-map', '[vout]',
           '-map', replacementAudioIdx !== -1 ? `${replacementAudioIdx}:a` : '0:a?',
-          '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-threads', '4',
-          '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
-          '-max_muxing_queue_size', '1024',
+          '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
+          '-c:a', 'aac', '-b:a', '320k',
           '-movflags', '+faststart',
           outputPath,
         ];
@@ -1715,9 +1713,8 @@ export class Processor {
           '-filter_complex', effectiveFc,
           '-map', mapVideo,
           '-map', replacementAudioIdx !== -1 ? `${replacementAudioIdx}:a` : '0:a?',
-          '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-threads', '4',
-          '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
-          '-max_muxing_queue_size', '1024',
+          '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
+          '-c:a', 'aac', '-b:a', '320k',
           '-movflags', '+faststart',
           outputPath,
         ];
@@ -1748,9 +1745,8 @@ export class Processor {
             '-filter_complex', filterComplex,
             '-map', '[vout]',
             '-map', replacementAudioIdx !== -1 ? `${replacementAudioIdx}:a` : '0:a?',
-            '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-threads', '4',
-            '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
-            '-max_muxing_queue_size', '1024',
+            '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
+            '-c:a', 'aac', '-b:a', '320k',
             '-movflags', '+faststart',
             outputPath,
           ];
@@ -1773,9 +1769,8 @@ export class Processor {
               '-filter_complex', `[0:v]${baseVfForVf}[vout]`,
               '-map', '[vout]',
               '-map', `${replacementAudioIdx}:a`,
-              '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-threads', '4',
-              '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
-              '-max_muxing_queue_size', '1024',
+              '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
+              '-c:a', 'aac', '-b:a', '320k',
               '-movflags', '+faststart',
               outputPath,
             ];
@@ -1783,9 +1778,8 @@ export class Processor {
             ffmpegArgs = [
               ...inputs,
               '-vf', baseVfForVf,
-              '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-threads', '4',
-              '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
-              '-max_muxing_queue_size', '1024',
+              '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
+              '-c:a', 'aac', '-b:a', '320k',
               '-movflags', '+faststart',
               outputPath,
             ];
@@ -1815,8 +1809,8 @@ export class Processor {
             '-t',  String(durationSec),
             '-i',  sourceFile,
             '-vf', fallbackVf,
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-threads', '4',
-            '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+            '-c:v', 'libx264', '-preset', 'slow', '-crf', '15',
+            '-c:a', 'aac', '-b:a', '320k',
             '-movflags', '+faststart',
             outputPath,
           ];
@@ -2287,7 +2281,7 @@ export class Processor {
         '-i', inputVideoPath,
         '-filter_complex', filterComplex,
         ...mapArgs,
-        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '15', '-threads', '4',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '15',
         '-movflags', '+faststart',
         outputVideoPath,
       ]);
@@ -2574,15 +2568,9 @@ export class Processor {
     customThumbnailPath?: string;
     brandingLogoPath?: string;
     originalTranscriptWords?: TranscriptWord[];
-    avatarVideoPath?: string;
-    avatarConfig?: AvatarConfig;
   }): Promise<void> {
     if (opts.commentaryMode === 'hook_only' || opts.commentaryMode === 'hook_replay_outro') {
-      await this._renderHookOnlyCommentaryVideo(opts);
-      if (opts.avatarVideoPath) {
-        await this.overlayAvatarVideo(opts.outputPath, opts.avatarVideoPath, opts.avatarConfig);
-      }
-      return;
+      return this._renderHookOnlyCommentaryVideo(opts);
     }
 
     const {
@@ -2719,21 +2707,15 @@ export class Processor {
       '-map', '[aout]',
       '-c:v', 'libx264',
       '-crf', '17',
-      '-preset', 'medium',
-      '-threads', '4',
+      '-preset', 'slow',
       '-c:a', 'aac',
-      '-b:a', '192k',
-      '-ar', '48000',
-      '-ac', '2',
+      '-b:a', '320k',
       outputPath,
     ];
 
     try {
       await runProcess('ffmpeg', args);
       log.info({ outputPath }, 'Commentary video rendering complete');
-      if (opts.avatarVideoPath) {
-        await this.overlayAvatarVideo(outputPath, opts.avatarVideoPath, opts.avatarConfig);
-      }
     } finally {
       try { fs.unlinkSync(tmpAssPath); } catch { /* ignore */ }
       if (tmpCleanVideoPath) {
@@ -2912,9 +2894,9 @@ export class Processor {
       '-map', '[vout]',
       '-map', '[aout]',
       '-t', String(hookDurationMs / 1000),
-      '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+      '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
       '-pix_fmt', 'yuv420p', '-s', '1080x1920',
-      '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+      '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
       segAPath
     );
 
@@ -2928,9 +2910,7 @@ export class Processor {
     const origWords: TranscriptWord[] = opts.originalTranscriptWords && opts.originalTranscriptWords.length > 0
       ? opts.originalTranscriptWords
       : (parsedOpts.words || []);
-    const rawSegBWords = origWords.length > 0
-      ? origWords
-      : (opts.reactionWords && opts.reactionWords.length > 0 ? opts.reactionWords : (opts.words || []));
+    const rawSegBWords = origWords.length > 0 ? origWords : (opts.reactionWords || []);
     const segBRawPath = path.join(tmpDir, `hook_segB_raw_${Date.now()}.mp4`);
 
     const inputSource = (sourceFile && fs.existsSync(sourceFile)) ? sourceFile : sourceVideoPath;
@@ -3032,9 +3012,9 @@ export class Processor {
       }
 
       argsB.push(
-        '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+        '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
         '-pix_fmt', 'yuv420p', '-s', '1080x1920',
-        '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+        '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
         segBPath
       );
 
@@ -3046,9 +3026,9 @@ export class Processor {
         try {
           await runProcess('ffmpeg', [
             '-y', '-i', segBRawPath,
-            '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+            '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
             '-pix_fmt', 'yuv420p', '-s', '1080x1920',
-            '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+            '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
             segBPath,
           ]);
         } catch {
@@ -3060,9 +3040,9 @@ export class Processor {
       try {
         await runProcess('ffmpeg', [
           '-y', '-i', segBRawPath,
-          '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+          '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
           '-pix_fmt', 'yuv420p', '-s', '1080x1920',
-          '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+          '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
           segBPath,
         ]);
       } catch {
@@ -3086,9 +3066,9 @@ export class Processor {
           '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
           '-t', '0.4',
           '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p',
-          '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+          '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
           '-pix_fmt', 'yuv420p',
-          '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+          '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
           seg0Path,
         ]);
       } catch (thumbErr) {
@@ -3171,9 +3151,9 @@ export class Processor {
         '-map', '[aout]',
         '-t', String(takeawayDurMs / 1000),
         '-shortest',
-        '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+        '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
         '-pix_fmt', 'yuv420p', '-s', '1080x1920',
-        '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+        '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
         segCPath
       );
 
@@ -3262,7 +3242,7 @@ export class Processor {
           '-filter_complex', filterParts.join(';'),
           '-map', '[vout]',
           '-map', '[aout]',
-          '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+          '-c:v', 'libx264', '-crf', '17', '-preset', 'medium',
           '-c:a', 'aac', '-b:a', '320k',
           outputPath
         );
@@ -3304,7 +3284,7 @@ export class Processor {
           '-filter_complex', filterParts.join(';'),
           '-map', '[vout]',
           '-map', '[aout]',
-          '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-threads', '4',
+          '-c:v', 'libx264', '-crf', '17', '-preset', 'medium',
           '-c:a', 'aac', '-b:a', '320k',
           outputPath
         );
@@ -3320,85 +3300,6 @@ export class Processor {
       try { if (hasSegC) fs.unlinkSync(segCPath); } catch {}
       try { if (hasSegC && tmpAssPathC) fs.unlinkSync(tmpAssPathC); } catch {}
       try { if (useSeg0) fs.unlinkSync(seg0Path); } catch {}
-    }
-  }
-
-  /**
-   * Overlays generated Talking Avatar MP4 onto rendered commentary video using dynamic FFmpeg filter.
-   */
-  async overlayAvatarVideo(
-    sourceVideoPath: string,
-    avatarVideoPath: string,
-    avatarConfig?: AvatarConfig
-  ): Promise<void> {
-    if (!avatarVideoPath || !fs.existsSync(avatarVideoPath)) return;
-    if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) return;
-
-    log.info({ sourceVideoPath, avatarVideoPath, avatarConfig }, 'Overlaying Talking Avatar onto commentary video...');
-
-    const tmpOut = path.join(os.tmpdir(), `avatar_overlay_${Date.now()}.mp4`);
-    const pos = avatarConfig?.position || 'bottom-right';
-    const scalePercent = Math.max(10, Math.min(80, avatarConfig?.scalePercent || 30));
-    const chromaKey = avatarConfig?.chromaKeyGreen ?? false;
-
-    // Calculate width relative to horizontal Shorts canvas (1080px width) to make PIP scaling more natural
-    const targetWidth = Math.round(1080 * (scalePercent / 100));
-
-    let overlayExpr = `main_w-overlay_w-30:main_h-overlay_h-50`;
-    if (pos === 'bottom-left') {
-      overlayExpr = `30:main_h-overlay_h-50`;
-    } else if (pos === 'top-right') {
-      overlayExpr = `main_w-overlay_w-30:50`;
-    } else if (pos === 'top-left') {
-      overlayExpr = `30:50`;
-    } else if (pos === 'custom') {
-      const cx = avatarConfig?.customX ?? 30;
-      const cy = avatarConfig?.customY ?? 50;
-      overlayExpr = `${cx}:${cy}`;
-    }
-
-    let avatarFilter = `[1:v]scale=${targetWidth}:-1[av_scaled];`;
-    if (chromaKey) {
-      avatarFilter += `[av_scaled]chromakey=0x00FF00:0.1:0.2[av_ready];`;
-    } else {
-      avatarFilter += `[av_scaled]copy[av_ready];`;
-    }
-
-    // Use eof_action=pass (NOT shortest=1) so main video duration & audio are never truncated!
-    const filterComplex = `${avatarFilter}[0:v][av_ready]overlay=${overlayExpr}:eof_action=pass[vout]`;
-
-    const args = [
-      '-y',
-      '-i', sourceVideoPath,
-      '-stream_loop', '-1',
-      '-i', avatarVideoPath,
-      '-filter_complex', filterComplex,
-      '-map', '[vout]',
-      '-map', '0:a',
-      '-c:v', 'libx264',
-      '-crf', '17',
-      '-preset', 'medium',
-      '-threads', '4',
-      '-c:a', 'copy',
-      tmpOut,
-    ];
-
-    try {
-      const origDur = await this.getVideoDurationMs(sourceVideoPath);
-      await runProcess('ffmpeg', args);
-      const newDur = await this.getVideoDurationMs(tmpOut);
-
-      // Only accept overlay if output file is valid and preserves at least 95% of original video duration
-      if (fs.existsSync(tmpOut) && fs.statSync(tmpOut).size > 1000 && (origDur === 0 || newDur >= origDur * 0.95)) {
-        fs.copyFileSync(tmpOut, sourceVideoPath);
-        log.info({ sourceVideoPath, origDur, newDur }, 'Successfully overlaid Talking Avatar onto commentary video');
-      } else {
-        log.warn({ origDur, newDur }, 'Overlay output truncated or invalid, keeping original commentary video');
-      }
-    } catch (err) {
-      log.warn({ err }, 'Failed to overlay avatar video, keeping original commentary video');
-    } finally {
-      try { if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut); } catch {}
     }
   }
 }

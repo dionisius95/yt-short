@@ -37,13 +37,12 @@ import shutil
 # ---------------------------------------------------------------------------
 
 async def generate_tts_segments(
-    segments, voice, tmp_dir, google_tts_key=None, gemini_api_key=None,
+    segments, voice, tmp_dir, google_tts_key=None,
     vertex_access_token=None, vertex_project_id=None
 ):
     """
     Generate TTS audio for each text segment.
     Uses Gemini API on Vertex AI if vertex_access_token is provided.
-    Falls back to Gemini AI Studio if gemini_api_key is provided.
     Uses Google Cloud TTS if api_key provided, falls back to edge-tts.
     Returns list of (startMs, endMs, wav_path).
     """
@@ -60,8 +59,6 @@ async def generate_tts_segments(
         if voice.startswith('gemini-'):
             if vertex_access_token and vertex_project_id:
                 success = await _gemini_tts(text, voice, mp3_path, vertex_access_token, vertex_project_id)
-            elif gemini_api_key:
-                success = await _gemini_tts_studio(text, voice, mp3_path, gemini_api_key)
             
             if not success:
                 # Fallback to standard neural voice
@@ -358,12 +355,17 @@ async def _google_tts(text, voice_name, output_path, api_key):
         'zh-CN-YunxiNeural':   ('zh-CN', 'cmn-CN-Wavenet-C', 'MALE'),
         'zh-CN-XiaoxiaoNeural':('zh-CN', 'cmn-CN-Wavenet-A', 'FEMALE'),
         
-        # Explicit Google Neural2 selector IDs
+        # Explicit Google Neural2, Journey, & Studio selector IDs
         'google-id-ID-Neural2-B':    ('id-ID', 'id-ID-Neural2-B', 'MALE'),
         'google-id-ID-Neural2-C':    ('id-ID', 'id-ID-Neural2-C', 'MALE'),
         'google-id-ID-Neural2-A':    ('id-ID', 'id-ID-Neural2-A', 'FEMALE'),
         'google-en-US-Neural2-D':    ('en-US', 'en-US-Neural2-D', 'MALE'),
         'google-en-US-Neural2-F':    ('en-US', 'en-US-Neural2-F', 'FEMALE'),
+        'google-en-US-Journey-D':    ('en-US', 'en-US-Journey-D', 'MALE'),
+        'google-en-US-Journey-F':    ('en-US', 'en-US-Journey-F', 'FEMALE'),
+        'google-en-US-Journey-O':    ('en-US', 'en-US-Journey-O', 'FEMALE'),
+        'google-en-US-Studio-O':     ('en-US', 'en-US-Studio-O', 'FEMALE'),
+        'google-en-US-Studio-Q':     ('en-US', 'en-US-Studio-Q', 'MALE'),
         'google-ja-JP-Neural2-C':    ('ja-JP', 'ja-JP-Neural2-C', 'MALE'),
         'google-ja-JP-Neural2-B':    ('ja-JP', 'ja-JP-Neural2-B', 'FEMALE'),
     }
@@ -419,7 +421,7 @@ async def _google_tts(text, voice_name, output_path, api_key):
 async def _edge_tts(text, voice, output_path):
     """Generate TTS using edge-tts (Microsoft Neural TTS, free)."""
     try:
-        import edge_tts
+        import edge_tts  # type: ignore
         communicate = edge_tts.Communicate(text, voice)
         await communicate.save(output_path)
         return True
@@ -438,7 +440,7 @@ def _gtts_sync(text, lang_code, output_path):
     lang_code: ISO 639-1 e.g. 'id', 'en', 'ja'
     """
     try:
-        from gtts import gTTS
+        from gtts import gTTS  # type: ignore
         tts = gTTS(text=text, lang=lang_code, slow=False)
         tts.save(output_path)
         return True
@@ -556,11 +558,11 @@ def build_tts_track(tts_segments, total_duration_ms, tmp_dir, sample_rate=44100)
         # Allow up to 10% overflow — don't stretch too aggressively
         if target_duration_ms > 0 and tts_duration_ms > 0:
             ratio = tts_duration_ms / target_duration_ms
-            # Only speed up if TTS is longer than target (ratio > 1.0). Never slow down (ratio < 1.0).
+            # Speed up TTS if audio exceeds target slot so speech never overflows or truncates
             if ratio < 1.0:
                 ratio = 1.0
             else:
-                ratio = min(1.25, ratio)
+                ratio = min(1.5, ratio)
         else:
             ratio = 1.0
 
@@ -692,7 +694,7 @@ def separate_vocals(video_path, tmp_dir):
         return video_path
 
     try:
-        from audio_separator.separator import Separator
+        from audio_separator.separator import Separator  # type: ignore
         model_dir = os.environ.get("AUDIO_SEPARATOR_MODEL_DIR")
         if not model_dir:
             model_dir = os.path.join(os.path.expanduser("~"), ".audio-separator-models")
@@ -823,31 +825,19 @@ def main():
                     target_duration = seg['endMs'] - seg['startMs']
                     actual_duration = get_audio_duration_ms(seg['path'])
                     
-                    if target_duration > 0 and actual_duration > 0:
-                        ratio = actual_duration / target_duration
-                        if ratio < 1.0:
-                            scale = actual_duration / target_duration
-                            for w in seg_words:
-                                w_start = seg['startMs'] + (w['startMs'] - seg['startMs']) * scale
-                                w_end = seg['startMs'] + (w['endMs'] - seg['startMs']) * scale
-                                aligned_words.append({
-                                    **w,
-                                    'startMs': int(w_start + clip_start_ms),
-                                    'endMs': int(w_end + clip_start_ms)
-                                })
-                        else:
-                            for w in seg_words:
-                                aligned_words.append({
-                                    **w,
-                                    'startMs': int(w['startMs'] + clip_start_ms),
-                                    'endMs': int(w['endMs'] + clip_start_ms)
-                                })
-                    else:
+                    if actual_duration > 0 and seg_words:
+                        total_chars = sum(max(1, len(w.get('word', ''))) for w in seg_words)
+                        curr_ms = seg['startMs']
                         for w in seg_words:
+                            w_len = max(1, len(w.get('word', '')))
+                            w_dur = (w_len / total_chars) * actual_duration if total_chars > 0 else (actual_duration / len(seg_words))
+                            w_start = curr_ms
+                            w_end = curr_ms + w_dur
+                            curr_ms = w_end
                             aligned_words.append({
                                 **w,
-                                'startMs': int(w['startMs'] + clip_start_ms),
-                                'endMs': int(w['endMs'] + clip_start_ms)
+                                'startMs': int(w_start + clip_start_ms),
+                                'endMs': int(w_end + clip_start_ms)
                             })
                 
                 with open(args.output_transcript, 'w', encoding='utf-8') as f:

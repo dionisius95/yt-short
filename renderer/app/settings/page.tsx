@@ -65,18 +65,24 @@ export default function SettingsPage() {
       return;
     }
     setLoading(true);
-    try {
-      const [s, d] = await Promise.all([
-        ipc.settings.get(),
-        ipc.deps.check(),
-      ]);
-      setSettings(s);
-      setDeps(d);
-    } catch {
-      showToast('Failed to load settings.', 'error');
-    } finally {
-      setLoading(false);
-    }
+    // Load settings instantly
+    ipc.settings.get()
+      .then((s) => {
+        setSettings(s);
+      })
+      .catch(() => {
+        showToast('Failed to load settings.', 'error');
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+
+    // Check dependencies asynchronously in background
+    ipc.deps.check()
+      .then((d) => {
+        setDeps(d);
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => { void load(); }, [load]);

@@ -6,9 +6,10 @@
     "moduleResolution": "node",
     "outDir": "dist",
     "rootDir": ".",
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": true,
+    "skipLibCheck": true
   },
   "include": ["electron/**/*", "shared/**/*"],
   "exclude": ["node_modules", "dist", "renderer", "tests"]

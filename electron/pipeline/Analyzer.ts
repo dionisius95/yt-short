@@ -126,7 +126,7 @@ const ISO_TO_LANGUAGE: Record<string, string> = {
 
 function detectLanguage(transcript: Transcript): string {
   const code = transcript.language;
-  if (!code || code === 'auto' || code === 'unknown') {
+  if (!code || code === 'auto' || code === 'unknown' || code === 'und') {
     return 'the same language as the transcript';
   }
   // Try exact match, then prefix match (e.g. "zh-TW" → "zh")
@@ -220,13 +220,13 @@ interface GeminiResponse {
 async function callGemini(
   systemPrompt: string,
   userPrompt: string,
-  _geminiApiKey: string,
   serviceAccountPath?: string,
 ): Promise<string> {
-  if (!serviceAccountPath || !fs.existsSync(serviceAccountPath)) {
-    throw new Error('Service account required for Gemini (Vertex AI)');
+  if (serviceAccountPath && fs.existsSync(serviceAccountPath)) {
+    return await _callGeminiVertexAI(systemPrompt, userPrompt, serviceAccountPath);
   }
-  return _callGeminiVertexAI(systemPrompt, userPrompt, serviceAccountPath);
+
+  throw new Error('Google Cloud Service Account JSON Key (Vertex AI) is required for AI Analysis.');
 }
 
 /** Vertex AI Gemini — uses Google Cloud credits */
@@ -264,29 +264,42 @@ async function _callGeminiVertexAI(
   if (!tokenResponse.ok) throw new Error(`Token exchange failed: ${tokenResponse.status}`);
   const tokenData = await tokenResponse.json() as { access_token: string };
 
-  const model = 'gemini-2.5-flash';
-  const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${keyData.project_id}/locations/us-central1/publishers/google/models/${model}:generateContent`;
+  const models = ['gemini-3.6-flash', 'gemini-3.0-flash', 'gemini-1.5-flash-002', 'gemini-1.5-flash-001', 'gemini-2.5-flash', 'gemini-2.0-flash-001', 'gemini-1.5-flash'];
+  let lastErr: Error | null = null;
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${tokenData.access_token}`,
-    },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
-      generationConfig: { temperature: 0.1, maxOutputTokens: 8192, responseMimeType: 'application/json' },
-    }),
-  });
+  for (const model of models) {
+    const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${keyData.project_id}/locations/us-central1/publishers/google/models/${model}:generateContent`;
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Vertex AI Gemini error ${response.status}: ${errText.slice(0, 300)}`);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${tokenData.access_token}`,
+        },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 8192, responseMimeType: 'application/json' },
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        if (response.status === 404 || errText.includes('NOT_FOUND')) continue;
+        throw new Error(`Vertex AI Gemini error ${response.status}: ${errText.slice(0, 300)}`);
+      }
+
+      const data = await response.json() as GeminiResponse;
+      return data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    } catch (e: any) {
+      lastErr = e;
+      if (e?.message?.includes('404') || e?.message?.includes('NOT_FOUND')) continue;
+      throw e;
+    }
   }
-
-  const data = await response.json() as GeminiResponse;
-  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  throw lastErr || new Error('All Vertex AI Gemini model candidates failed');
 }
+
 
 // ---------------------------------------------------------------------------
 // HTTP helpers (Ollama)
@@ -506,7 +519,6 @@ export class Analyzer {
     transcript: Transcript,
     modelName: string = 'llama3',
     durationMs?: number,
-    geminiApiKey?: string,
     serviceAccountPath?: string,
     momentTheme?: string,
   ): Promise<Hook[]> {
@@ -529,38 +541,58 @@ export class Analyzer {
     const language = detectLanguage(transcript);
     const systemPrompt = buildSystemPrompt(durationMs, language, momentTheme);
 
-    // ── Try Vertex AI Gemini first (requires service account) ────────────────
-    // Chunk the transcript into ~5 000-word pieces so the prompt stays lean
-    // while still covering the entire video (not just the first few minutes).
-    if (serviceAccountPath) {
+    let hooksData: Hook[] = [];
+    let processedSuccessfully = false;
+
+    const GEMINI_WORDS_PER_CHUNK = 5000;
+    const totalWords = transcript.words.length;
+    const geminiChunkCount = Math.max(1, Math.ceil(totalWords / GEMINI_WORDS_PER_CHUNK));
+    const geminiChunkTexts = geminiChunkCount > 1
+      ? buildChunkedTranscriptTexts(transcript, geminiChunkCount)
+      : [buildSampledTranscriptText(transcript, GEMINI_WORDS_PER_CHUNK)];
+
+    // 1. Try Vertex AI Gemini first
+    if (serviceAccountPath && fs.existsSync(serviceAccountPath)) {
       try {
-        const GEMINI_WORDS_PER_CHUNK = 5000;
-        const totalWords = transcript.words.length;
-        const geminiChunkCount = Math.max(1, Math.ceil(totalWords / GEMINI_WORDS_PER_CHUNK));
-        const geminiChunkTexts = geminiChunkCount > 1
-          ? buildChunkedTranscriptTexts(transcript, geminiChunkCount)
-          : [buildSampledTranscriptText(transcript, GEMINI_WORDS_PER_CHUNK)];
-
-        log.info({ projectId, wordCount: totalWords, geminiChunkCount, language }, 'Starting hook detection via Gemini 2.5 Flash (chunked)');
-
+        log.info({ projectId, wordCount: totalWords, geminiChunkCount, language }, 'Starting hook detection via Vertex AI (chunked)');
         let geminiHooks: Hook[] = [];
         for (let chunkIdx = 0; chunkIdx < geminiChunkTexts.length; chunkIdx++) {
-          log.debug({ projectId, chunkIdx, geminiChunkCount }, 'Gemini: processing chunk');
+          log.debug({ projectId, chunkIdx, geminiChunkCount }, 'Vertex AI: processing chunk');
           const chunkHooks = await this._detectWithGemini(
-            projectId, geminiChunkTexts[chunkIdx], systemPrompt, durationMs, geminiApiKey ?? '', serviceAccountPath,
+            projectId, geminiChunkTexts[chunkIdx], systemPrompt, durationMs, serviceAccountPath,
           );
           geminiHooks = geminiHooks.concat(chunkHooks);
         }
 
         if (geminiHooks.length >= MIN_HOOKS) {
-          const clamped = clampHooks(geminiHooks, projectId);
-          log.info({ projectId, hookCount: clamped.length }, 'Gemini hook detection complete');
-          return clamped;
+          hooksData = geminiHooks;
+          processedSuccessfully = true;
+          log.info({ projectId, hookCount: hooksData.length }, 'Vertex AI hook detection complete');
+        } else {
+          log.warn({ projectId, hookCount: geminiHooks.length }, 'Vertex AI returned insufficient hooks');
         }
-        log.warn({ projectId, hookCount: geminiHooks.length }, 'Gemini returned insufficient hooks, falling back to Ollama');
       } catch (err) {
-        log.warn({ projectId, err }, 'Gemini failed, falling back to Ollama');
+        log.warn({ projectId, err }, 'Vertex AI failed');
       }
+    }
+
+    if (processedSuccessfully) {
+      const clamped = clampHooks(hooksData, projectId);
+      if (durationMs) {
+        return [
+          {
+            id:         crypto.randomUUID(),
+            projectId,
+            startMs:    0,
+            endMs:      durationMs,
+            viralScore: 100,
+            summary:    'Full video clip',
+            dismissed:  false,
+          },
+          ...clamped,
+        ];
+      }
+      return clamped;
     }
 
     // ── Fallback: Ollama (chunked + sampled for limited context window) ────
@@ -571,7 +603,6 @@ export class Analyzer {
     // For long videos, split into chunks so every part of the video is covered.
     // Each chunk is sampled down to ~1200 words to fit Ollama's context window.
     const WORDS_PER_CHUNK = 1200;
-    const totalWords = transcript.words.length;
     const chunkCount = Math.max(1, Math.ceil(totalWords / WORDS_PER_CHUNK));
 
     log.info({ projectId, totalWords, chunkCount }, 'Splitting transcript into chunks for Ollama');
@@ -641,6 +672,20 @@ export class Analyzer {
     if (allHooks.length >= MIN_HOOKS) {
       const clamped = clampHooks(allHooks, projectId);
       log.info({ projectId, hookCount: clamped.length }, 'Ollama hook detection complete');
+      if (durationMs) {
+        return [
+          {
+            id:         crypto.randomUUID(),
+            projectId,
+            startMs:    0,
+            endMs:      durationMs,
+            viralScore: 100,
+            summary:    'Full video clip',
+            dismissed:  false,
+          },
+          ...clamped,
+        ];
+      }
       return clamped;
     }
 
@@ -661,11 +706,10 @@ export class Analyzer {
     transcriptText: string,
     systemPrompt: string,
     durationMs: number | undefined,
-    geminiApiKey: string,
     serviceAccountPath?: string,
   ): Promise<Hook[]> {
     const userPrompt = buildUserPrompt(transcriptText);
-    const rawResponse = await callGemini(systemPrompt, userPrompt, geminiApiKey, serviceAccountPath);
+    const rawResponse = await callGemini(systemPrompt, userPrompt, serviceAccountPath);
 
     log.info({ projectId, rawResponseLength: rawResponse.length, rawResponsePreview: rawResponse.slice(0, 500) }, 'Gemini raw response');
 

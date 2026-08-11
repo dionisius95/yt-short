@@ -2,7 +2,7 @@
 
 /**
  * AppShell — root layout grid.
- * Grid: [240px sidebar | 1fr main]
+ * Grid: [160px sidebar | 1fr main]
  * Main column: [TopBar row | scrollable content row]
  * Requirements: 1.6, 10.6
  */
@@ -17,7 +17,7 @@ interface AppShellProps {
 
 export function AppShell({ title, actions, children }: AppShellProps) {
   return (
-    <div className="grid h-screen grid-cols-[240px_1fr] overflow-hidden bg-background">
+    <div className="grid h-screen grid-cols-[160px_1fr] overflow-hidden bg-background">
       {/* ── Left column: persistent sidebar ── */}
       <Sidebar />
 
@@ -25,15 +25,29 @@ export function AppShell({ title, actions, children }: AppShellProps) {
       <div className="flex flex-col overflow-hidden">
         {/* Inline TopBar to avoid circular import; keep it lightweight */}
         <header
-          className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-surface px-6"
+          className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-surface px-4"
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         >
-          <h1
-            className="text-sm font-semibold text-text-primary"
+          <div
+            className="flex items-center gap-4"
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           >
-            {title}
-          </h1>
+            <h1 className="text-xs font-bold text-text-primary tracking-wide">
+              {title}
+            </h1>
+
+            {/* NLE Editor Top Menu Bar */}
+            <div className="hidden md:flex items-center gap-2.5 text-[11px] font-medium text-text-secondary select-none border-l border-border/60 pl-3">
+              <span className="hover:text-text-primary cursor-pointer transition-micro">File</span>
+              <span className="hover:text-text-primary cursor-pointer transition-micro">Edit</span>
+              <span className="hover:text-text-primary cursor-pointer transition-micro">Sequence</span>
+              <span className="hover:text-text-primary cursor-pointer transition-micro font-semibold text-accent/90">Tracks</span>
+              <span className="hover:text-text-primary cursor-pointer transition-micro">Audio</span>
+              <span className="hover:text-text-primary cursor-pointer transition-micro">View</span>
+              <span className="hover:text-text-primary cursor-pointer transition-micro">Window</span>
+            </div>
+          </div>
+
           {actions && (
             <div
               className="flex items-center gap-2"

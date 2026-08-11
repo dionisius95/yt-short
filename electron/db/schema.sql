@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS transcripts (
   language    TEXT NOT NULL,
   words_json  TEXT NOT NULL,
   is_empty    INTEGER NOT NULL DEFAULT 0,
-  created_at  INTEGER NOT NULL
+  created_at  INTEGER NOT NULL,
+  original_words_json TEXT,
+  original_language   TEXT
 );
 
 -- Hooks
@@ -49,6 +51,10 @@ CREATE TABLE IF NOT EXISTS clips (
   zoom_enabled      INTEGER NOT NULL DEFAULT 1,
   error_message     TEXT,
   youtube_url       TEXT,
+  tiktok_url        TEXT,
+  facebook_url      TEXT,
+  telegram_url      TEXT,
+  options_json      TEXT,
   created_at        INTEGER NOT NULL,
   updated_at        INTEGER NOT NULL
 );

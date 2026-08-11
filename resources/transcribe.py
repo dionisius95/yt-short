@@ -52,12 +52,17 @@ def main():
         print('ERROR: faster-whisper is not installed. Run: pip install faster-whisper', file=sys.stderr)
         sys.exit(1)
 
+    import os
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_DOMAIN_NUM_THREADS"] = "1"
+
     language = None if args.language in ('auto', 'automatic') else args.language
 
     print('whisper_print_progress_callback: progress = 5 %', file=sys.stderr, flush=True)
 
     # Load model (may download on first run)
-    model = WhisperModel(args.model, device='cpu', compute_type='int8')
+    model = WhisperModel(args.model, device='cpu', compute_type='int8', cpu_threads=2)
 
     print('whisper_print_progress_callback: progress = 20 %', file=sys.stderr, flush=True)
 

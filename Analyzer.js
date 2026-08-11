@@ -66,7 +66,7 @@ function buildTranscriptText(transcript) {
  * Returns ISO code or 'unknown'.
  */
 function detectLanguage(transcript) {
-    return transcript.language && transcript.language !== 'auto'
+    return transcript.language && transcript.language !== 'auto' && transcript.language !== 'und'
         ? transcript.language
         : 'the same language as the transcript';
 }

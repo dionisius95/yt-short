@@ -8,6 +8,7 @@
     "allowJs": false,
     "jsx": "preserve",
     "strict": true,
+    "noEmit": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
     "strictFunctionTypes": true,

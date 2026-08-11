@@ -15,6 +15,7 @@ import { ipc } from '../lib/ipc-client';
 import { validateYouTubeUrl } from '../lib/urlValidator';
 import type { ProjectDashboardItem } from '../../shared/types';
 import { cn } from '../lib/utils';
+import { DiscoverPanel } from '../components/discover/DiscoverPanel';
 
 // ---------------------------------------------------------------------------
 // Empty state — large URL input
@@ -45,7 +46,7 @@ function EmptyState({ onSubmit }: { onSubmit: (url: string) => void }) {
       <div>
         <h2 className="text-lg font-semibold text-text-primary">No projects yet</h2>
         <p className="mt-1 text-sm text-text-secondary">
-          Paste a YouTube URL below to import your first video.
+          Paste a YouTube or Clip.Cafe URL below to import your first video.
         </p>
       </div>
 
@@ -56,8 +57,8 @@ function EmptyState({ onSubmit }: { onSubmit: (url: string) => void }) {
             type="url"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://www.youtube.com/watch?v=..."
-            aria-label="YouTube URL"
+            placeholder="Paste YouTube or Clip.Cafe URL here…"
+            aria-label="Video URL"
             className={cn(
               'w-full rounded-md border bg-surface px-4 py-2.5 text-sm text-text-primary',
               'placeholder:text-text-secondary/60',
@@ -161,6 +162,9 @@ export default function DashboardPage() {
     <>
       <AppShell title="Dashboard" actions={actions}>
         <div className="p-6">
+          {/* YouTube discovery: search + trending */}
+          <DiscoverPanel className="mb-8" />
+
           {/* Error state */}
           {error && (
             <div className="mb-6 flex items-center justify-between rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3">

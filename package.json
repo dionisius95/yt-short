@@ -1,5 +1,5 @@
 {
-  "name": "ai-shorts-generator",
+  "name": "shorts-editor",
   "version": "0.1.0",
   "description": "Local-first desktop application to transform long-form YouTube videos into viral short-form clips",
   "main": "dist/electron/main.js",
@@ -9,7 +9,7 @@
     "dev:electron": "tsc -p tsconfig.electron.json && xcopy /Y electron\\db\\schema.sql dist\\electron\\db\\ && wait-on http://localhost:3000 && cross-env NODE_ENV=development electron .",
     "build": "npm run build:next && npm run build:electron",
     "build:next": "cross-env NODE_OPTIONS=--max-old-space-size=4096 next build renderer && node scripts/fix-output.js",
-    "build:electron": "tsc -p tsconfig.electron.json && xcopy /Y electron\\db\\schema.sql dist\\electron\\db\\",
+    "build:electron": "cross-env NODE_OPTIONS=--max-old-space-size=4096 tsc -p tsconfig.electron.json && xcopy /Y electron\\db\\schema.sql dist\\electron\\db\\",
     "dist": "npm run build && electron-builder",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
@@ -23,7 +23,6 @@
     "electron",
     "youtube",
     "shorts",
-    "ai",
     "video"
   ],
   "author": "",
@@ -40,7 +39,8 @@
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "tailwind-merge": "^2.4.0",
-    "tailwindcss-animate": "^1.0.7"
+    "tailwindcss-animate": "^1.0.7",
+    "telegram": "^2.26.22"
   },
   "devDependencies": {
     "@types/better-sqlite3": "7.6.11",

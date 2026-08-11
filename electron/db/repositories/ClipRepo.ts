@@ -5,8 +5,8 @@
 import Database from 'better-sqlite3';
 import type { Clip } from '../../../shared/types';
 
-// The caller supplies everything except the three nullable output fields.
-type InsertInput = Omit<Clip, 'outputPath' | 'errorMessage' | 'youtubeUrl'>;
+// The caller supplies everything except the nullable output fields.
+type InsertInput = Omit<Clip, 'outputPath' | 'errorMessage' | 'youtubeUrl' | 'tiktokUrl' | 'facebookUrl' | 'telegramUrl'>;
 
 export class ClipRepo {
   constructor(private readonly db: Database.Database) {}
@@ -19,13 +19,13 @@ export class ClipRepo {
 
     this.db
       .prepare<[
-        string, string, string, string, string, string, number, number, number
+        string, string, string, string, string, string, number, string | null, number, number
       ]>(`
         INSERT INTO clips
           (id, project_id, hook_id, status,
-           subtitle_style, subtitle_position, zoom_enabled,
+           subtitle_style, subtitle_position, zoom_enabled, options_json,
            created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         clip.id,
@@ -35,6 +35,7 @@ export class ClipRepo {
         clip.subtitleStyle,
         clip.subtitlePosition,
         clip.zoomEnabled ? 1 : 0,
+        clip.optionsJson ?? null,
         now,
         now
       );
@@ -44,6 +45,9 @@ export class ClipRepo {
       outputPath: null,
       errorMessage: null,
       youtubeUrl: null,
+      tiktokUrl: null,
+      facebookUrl: null,
+      telegramUrl: null,
     };
   }
 
@@ -55,7 +59,7 @@ export class ClipRepo {
       .prepare<[string]>(`
         SELECT id, project_id, hook_id, status,
                output_path, subtitle_style, subtitle_position,
-               zoom_enabled, error_message, youtube_url
+               zoom_enabled, error_message, youtube_url, tiktok_url, facebook_url, telegram_url, options_json
         FROM clips
         WHERE project_id = ?
         ORDER BY created_at ASC
@@ -73,7 +77,7 @@ export class ClipRepo {
       .prepare<[string]>(`
         SELECT id, project_id, hook_id, status,
                output_path, subtitle_style, subtitle_position,
-               zoom_enabled, error_message, youtube_url
+               zoom_enabled, error_message, youtube_url, tiktok_url, facebook_url, telegram_url, options_json
         FROM clips
         WHERE id = ?
       `)
@@ -125,6 +129,81 @@ export class ClipRepo {
   }
 
   /**
+   * Record the TikTok URL after a successful upload.
+   */
+  updateTikTokUrl(id: string, tiktokUrl: string): void {
+    const now = Date.now();
+    this.db
+      .prepare<[string, number, string]>(`
+        UPDATE clips SET tiktok_url = ?, updated_at = ? WHERE id = ?
+      `)
+      .run(tiktokUrl, now, id);
+  }
+
+  /**
+   * Record the Facebook URL after a successful upload.
+   */
+  updateFacebookUrl(id: string, facebookUrl: string): void {
+    const now = Date.now();
+    this.db
+      .prepare<[string, number, string]>(`
+        UPDATE clips SET facebook_url = ?, updated_at = ? WHERE id = ?
+      `)
+      .run(facebookUrl, now, id);
+  }
+
+  /**
+   * Record the Telegram URL after a successful upload.
+   */
+  updateTelegramUrl(id: string, telegramUrl: string): void {
+    const now = Date.now();
+    this.db
+      .prepare<[string, number, string]>(`
+        UPDATE clips SET telegram_url = ?, updated_at = ? WHERE id = ?
+      `)
+      .run(telegramUrl, now, id);
+  }
+
+  /**
+   * Update the options json of a clip.
+   */
+  updateOptions(id: string, optionsJson: string): void {
+    const now = Date.now();
+    this.db
+      .prepare<[string, number, string]>(`
+        UPDATE clips SET options_json = ?, updated_at = ? WHERE id = ?
+      `)
+      .run(optionsJson, now, id);
+  }
+
+  /**
+   * Update the subtitle style of a clip.
+   */
+  updateSubtitleStyle(id: string, subtitleStyle: string): void {
+    const now = Date.now();
+    this.db
+      .prepare<[string, number, string]>(`
+        UPDATE clips SET subtitle_style = ?, updated_at = ? WHERE id = ?
+      `)
+      .run(subtitleStyle, now, id);
+  }
+
+  /**
+   * Reset any clips that were left in 'processing' or 'pending' status
+   * when the app starts.
+   */
+  resetStuckClips(): void {
+    const now = Date.now();
+    this.db
+      .prepare(`
+        UPDATE clips
+        SET status = 'failed', error_message = 'Interrupted due to application restart', updated_at = ?
+        WHERE status IN ('processing', 'pending')
+      `)
+      .run(now);
+  }
+
+  /**
    * Delete a clip by id.
    */
   delete(id: string): void {
@@ -147,6 +226,10 @@ interface RawClip {
   zoom_enabled: number; // 0 | 1
   error_message: string | null;
   youtube_url: string | null;
+  tiktok_url: string | null;
+  facebook_url: string | null;
+  telegram_url: string | null;
+  options_json: string | null;
 }
 
 function mapRow(r: RawClip): Clip {
@@ -161,5 +244,9 @@ function mapRow(r: RawClip): Clip {
     zoomEnabled: r.zoom_enabled !== 0,
     errorMessage: r.error_message,
     youtubeUrl: r.youtube_url,
+    tiktokUrl: r.tiktok_url,
+    facebookUrl: r.facebook_url,
+    telegramUrl: r.telegram_url,
+    optionsJson: r.options_json,
   };
 }

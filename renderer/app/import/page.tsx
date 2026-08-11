@@ -115,7 +115,7 @@ function ImportPageInner() {
           <div className="mb-8">
             <h2 className="text-xl font-bold text-text-primary">Import a YouTube Video</h2>
             <p className="mt-1 text-sm text-text-secondary">
-              Paste a YouTube link and select quality. The video will be downloaded and queued for AI processing.
+              Paste a YouTube link and select quality. The video will be downloaded and queued for processing.
             </p>
           </div>
 

@@ -55,6 +55,23 @@ export function validateYouTubeUrl(url: string): { valid: boolean; videoId: stri
     return { valid: false, videoId: null };
   }
 
+  if (trimmed.toLowerCase().includes('clip.cafe/')) {
+    return { valid: true, videoId: 'clipcafe' };
+  }
+
+  const lower = trimmed.toLowerCase();
+  if (lower.includes('tiktok.com/') || lower.includes('vt.tiktok.com/') || lower.includes('vm.tiktok.com/')) {
+    return { valid: true, videoId: 'tiktok' };
+  }
+
+  if (
+    lower.includes('xiaohongshu.com/') ||
+    lower.includes('xhslink.com/') ||
+    lower.includes('rednote.com/')
+  ) {
+    return { valid: true, videoId: 'rednote' };
+  }
+
   // Check standard watch URL
   const watchMatch = WATCH_PATTERN.exec(trimmed);
   if (watchMatch) {

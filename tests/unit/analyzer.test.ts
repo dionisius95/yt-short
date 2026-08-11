@@ -19,6 +19,11 @@ vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: vi.fn(() => []) },
 }))
 
+vi.mock('../../electron/utils/ollamaHealth', () => ({
+  ensureOllamaRunning: vi.fn(() => Promise.resolve()),
+  isOllamaRunning: vi.fn(() => Promise.resolve(true)),
+}))
+
 // Import Analyzer AFTER mocks are set up
 import { Analyzer, _setHttpRequest } from '../../electron/pipeline/Analyzer'
 
@@ -26,50 +31,20 @@ import { Analyzer, _setHttpRequest } from '../../electron/pipeline/Analyzer'
 // Helper — build a fake req/res pair and queue it on requestSpy
 // ---------------------------------------------------------------------------
 
+const responseQueue: Array<{ body: string; statusCode: number; error?: Error }> = []
+const capturedReqBodies: string[] = []
+
 function queueHttpResponse(responseBody: string, statusCode = 200) {
-  const res = Object.assign(new EventEmitter(), { statusCode })
-
-  const req = Object.assign(new EventEmitter(), {
-    write: vi.fn(),
-    end: vi.fn(),
-    setTimeout: vi.fn(),
-    destroy: vi.fn(),
-  })
-
-  requestSpy.mockImplementationOnce((_opts: unknown, cb: unknown) => {
-    setImmediate(() => {
-      ;(cb as (r: typeof res) => void)(res)
-      setImmediate(() => {
-        res.emit('data', Buffer.from(responseBody))
-        res.emit('end')
-      })
-    })
-    return req
-  })
-
-  return { req, res }
+  responseQueue.push({ body: responseBody, statusCode })
 }
 
 function queueHttpError(message = 'ECONNREFUSED') {
-  const req = Object.assign(new EventEmitter(), {
-    write: vi.fn(),
-    end: vi.fn(),
-    setTimeout: vi.fn(),
-    destroy: vi.fn(),
-  })
-
-  requestSpy.mockImplementationOnce(() => {
-    setImmediate(() => {
-      req.emit('error', Object.assign(new Error(message), { code: message }))
-    })
-    return req
-  })
-
-  return req
+  const err = Object.assign(new Error(message), { code: message })
+  responseQueue.push({ body: '', statusCode: 0, error: err })
 }
 
 function ollamaBody(text: string) {
-  return JSON.stringify({ response: text, done: true })
+  return JSON.stringify({ message: { role: 'assistant', content: text }, done: true })
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +75,71 @@ describe('Analyzer.detectHooks', () => {
   beforeEach(() => {
     analyzer = new Analyzer()
     requestSpy.mockReset()
-    // Inject spy as http.request so Analyzer doesn't hit real Ollama
+    responseQueue.length = 0
+    capturedReqBodies.length = 0
+
+    requestSpy.mockImplementation((opts: any, cb: any) => {
+      // Intercept health check
+      if (opts && opts.path === '/') {
+        const res = Object.assign(new EventEmitter(), { statusCode: 200, resume: vi.fn() })
+        const req = Object.assign(new EventEmitter(), {
+          write: vi.fn(),
+          end: vi.fn(),
+          setTimeout: vi.fn(),
+          destroy: vi.fn(),
+        })
+        setImmediate(() => {
+          cb(res)
+          setImmediate(() => {
+            res.emit('data', Buffer.from('ok'))
+            res.emit('end')
+          })
+        })
+        return req
+      }
+
+      // Pop from queue
+      const next = responseQueue.shift()
+      if (!next) {
+        // Return dummy req
+        return Object.assign(new EventEmitter(), {
+          write: vi.fn((chunk: string) => { capturedReqBodies.push(chunk) }),
+          end: vi.fn(),
+          setTimeout: vi.fn(),
+          destroy: vi.fn(),
+        })
+      }
+
+      if (next.error) {
+        const req = Object.assign(new EventEmitter(), {
+          write: vi.fn((chunk: string) => { capturedReqBodies.push(chunk) }),
+          end: vi.fn(),
+          setTimeout: vi.fn(),
+          destroy: vi.fn(),
+        })
+        setImmediate(() => {
+          req.emit('error', next.error)
+        })
+        return req
+      }
+
+      const res = Object.assign(new EventEmitter(), { statusCode: next.statusCode, resume: vi.fn() })
+      const req = Object.assign(new EventEmitter(), {
+        write: vi.fn((chunk: string) => { capturedReqBodies.push(chunk) }),
+        end: vi.fn(),
+        setTimeout: vi.fn(),
+        destroy: vi.fn(),
+      })
+      setImmediate(() => {
+        cb(res)
+        setImmediate(() => {
+          res.emit('data', Buffer.from(next.body))
+          res.emit('end')
+        })
+      })
+      return req
+    })
+
     _setHttpRequest(requestSpy as unknown as typeof import('http').request)
   })
 
@@ -115,56 +154,22 @@ describe('Analyzer.detectHooks', () => {
 
   describe('default model name', () => {
     it('uses "llama3" as the default model when no modelName is provided', async () => {
-      let capturedBody = ''
-      const res = Object.assign(new EventEmitter(), { statusCode: 200 })
-      const req = Object.assign(new EventEmitter(), {
-        write: vi.fn((chunk: string) => { capturedBody += chunk }),
-        end: vi.fn(),
-        setTimeout: vi.fn(),
-        destroy: vi.fn(),
-      })
-
-      requestSpy.mockImplementationOnce((_opts: unknown, cb: unknown) => {
-        setImmediate(() => {
-          ;(cb as (r: typeof res) => void)(res)
-          setImmediate(() => {
-            res.emit('data', Buffer.from(ollamaBody(VALID_HOOKS_JSON)))
-            res.emit('end')
-          })
-        })
-        return req
-      })
+      capturedReqBodies.length = 0
+      queueHttpResponse(ollamaBody(VALID_HOOKS_JSON))
 
       await analyzer.detectHooks('proj-123', sampleTranscript)
 
-      const body = JSON.parse(capturedBody)
+      const body = JSON.parse(capturedReqBodies[0])
       expect(body.model).toBe('llama3')
     })
 
     it('uses the provided modelName when explicitly specified', async () => {
-      let capturedBody = ''
-      const res = Object.assign(new EventEmitter(), { statusCode: 200 })
-      const req = Object.assign(new EventEmitter(), {
-        write: vi.fn((chunk: string) => { capturedBody += chunk }),
-        end: vi.fn(),
-        setTimeout: vi.fn(),
-        destroy: vi.fn(),
-      })
-
-      requestSpy.mockImplementationOnce((_opts: unknown, cb: unknown) => {
-        setImmediate(() => {
-          ;(cb as (r: typeof res) => void)(res)
-          setImmediate(() => {
-            res.emit('data', Buffer.from(ollamaBody(VALID_HOOKS_JSON)))
-            res.emit('end')
-          })
-        })
-        return req
-      })
+      capturedReqBodies.length = 0
+      queueHttpResponse(ollamaBody(VALID_HOOKS_JSON))
 
       await analyzer.detectHooks('proj-123', sampleTranscript, 'mistral')
 
-      const body = JSON.parse(capturedBody)
+      const body = JSON.parse(capturedReqBodies[0])
       expect(body.model).toBe('mistral')
     })
   })
@@ -203,7 +208,7 @@ describe('Analyzer.detectHooks', () => {
       }
 
       expect((thrown as AppError).code).toBe('INSUFFICIENT_HOOKS')
-      expect((thrown as AppError).message).toMatch(/3 attempts/)
+      expect((thrown as AppError).message).toMatch(/after processing 1 chunk/)
     })
 
     it('succeeds on the second attempt when the first returns invalid JSON', async () => {
@@ -223,29 +228,47 @@ describe('Analyzer.detectHooks', () => {
 
   describe('OllamaUnavailableError', () => {
     it('throws AppError with code OLLAMA_UNAVAILABLE when http request emits error', async () => {
-      queueHttpError('ECONNREFUSED')
-
-      let thrown: unknown
+      const originalSetTimeout = global.setTimeout
+      global.setTimeout = ((fn: any) => setImmediate(fn)) as any
       try {
-        await analyzer.detectHooks('proj-123', sampleTranscript)
-      } catch (err) {
-        thrown = err
-      }
+        queueHttpError('ECONNREFUSED')
+        queueHttpError('ECONNREFUSED')
+        queueHttpError('ECONNREFUSED')
+        queueHttpError('ECONNREFUSED')
 
-      expect((thrown as AppError).code).toBe('OLLAMA_UNAVAILABLE')
+        let thrown: unknown
+        try {
+          await analyzer.detectHooks('proj-123', sampleTranscript)
+        } catch (err) {
+          thrown = err
+        }
+
+        expect((thrown as AppError).code).toBe('OLLAMA_UNAVAILABLE')
+      } finally {
+        global.setTimeout = originalSetTimeout
+      }
     })
 
     it('includes the original error message in the details field', async () => {
-      queueHttpError('ECONNREFUSED')
-
-      let thrown: unknown
+      const originalSetTimeout = global.setTimeout
+      global.setTimeout = ((fn: any) => setImmediate(fn)) as any
       try {
-        await analyzer.detectHooks('proj-123', sampleTranscript)
-      } catch (err) {
-        thrown = err
-      }
+        queueHttpError('ECONNREFUSED')
+        queueHttpError('ECONNREFUSED')
+        queueHttpError('ECONNREFUSED')
+        queueHttpError('ECONNREFUSED')
 
-      expect((thrown as AppError).details).toMatch(/ECONNREFUSED/)
+        let thrown: unknown
+        try {
+          await analyzer.detectHooks('proj-123', sampleTranscript)
+        } catch (err) {
+          thrown = err
+        }
+
+        expect((thrown as AppError).details).toMatch(/ECONNREFUSED/)
+      } finally {
+        global.setTimeout = originalSetTimeout
+      }
     })
 
     it('throws AppError with code OLLAMA_UNAVAILABLE when Ollama returns non-200 status', async () => {

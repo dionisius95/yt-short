@@ -19,6 +19,8 @@ import type {
   SubtitleStyle,
   SubtitlePosition,
   CaptionStyle,
+  CommentatorRequest,
+  CommentatorResult,
 } from '../../shared/types';
 
 // ---------------------------------------------------------------------------
@@ -169,8 +171,10 @@ export const ipc = {
         splitLayout?: import('../../shared/types').SplitLayout;
         gameRatio?: import('../../shared/types').GameRatio;
         gamePosition?: import('../../shared/types').GamePosition;
+        letterboxBg?: import('../../shared/types').LetterboxBackground;
         overrideWords?: import('../../shared/types').TranscriptWord[];
         thumbnailPath?: string;
+        titleOverlay?: import('../../shared/types').TitleOverlay;
       }
     ): Promise<{ clipId: string }> {
       return invoke<{ clipId: string }>('clip:generate', hookId, options);
@@ -186,6 +190,15 @@ export const ipc = {
     },
     delete(clipId: string): Promise<void> {
       return invoke<void>('clip:delete', clipId);
+    },
+    updateScript(clipId: string, customScript: string): Promise<void> {
+      return invoke<void>('clip:update-script', clipId, customScript);
+    },
+    updateCaptionVisibility(clipId: string, visible: boolean, customStyle?: CaptionStyle): Promise<void> {
+      return invoke<void>('clip:update-caption-visibility', clipId, visible, customStyle);
+    },
+    saveMetadata(clipId: string, metadata: { title: string; description: string; tags: string[] }): Promise<void> {
+      return invoke<void>('clip:save-metadata', clipId, metadata);
     },
     onProgress(
       listener: (data: { clipId: string; percent: number; eta: string }) => void
@@ -218,6 +231,9 @@ export const ipc = {
   upload: {
     startAuth(): Promise<void> {
       return invoke<void>('upload:auth:start');
+    },
+    disconnectAuth(): Promise<void> {
+      return invoke<void>('upload:auth:disconnect');
     },
     getAuthStatus(): Promise<{ authenticated: boolean; email?: string }> {
       return invoke<{ authenticated: boolean; email?: string }>(
@@ -264,15 +280,45 @@ export const ipc = {
     },
   },
 
+  preview: {
+    /** Render a single frame with full FFmpeg filter stack → base64 JPEG */
+    renderFrame(opts: {
+      hookId?:            string;
+      projectId?:         string;
+      sourceFile?:        string;
+      startMs?:           number;
+      endMs?:             number;
+      captionStyle:       import('../../shared/types').CaptionStyle;
+      layoutPreset?:      import('../../shared/types').LayoutPreset;
+      splitLayout?:       import('../../shared/types').SplitLayout;
+      gameRatio?:         import('../../shared/types').GameRatio;
+      gamePosition?:      import('../../shared/types').GamePosition;
+      letterboxBg?:       import('../../shared/types').LetterboxBackground;
+      logoOverlay?:       import('../../shared/types').LogoOverlay;
+      titleOverlay?:      import('../../shared/types').TitleOverlay;
+      zoomEnabled?:       boolean;
+      previewTimestampMs?: number;
+      overrideWords?:     import('../../shared/types').TranscriptWord[];
+      trackingMode?:      'auto' | 'manual' | 'none' | 'speaker';
+      subjectBbox?:       { x: number; y: number; w: number; h: number };
+      subjectSeedMs?:     number;
+    }): Promise<string | null> {
+      return invoke<string | null>('preview:render', opts);
+    },
+  },
+
   translate: {
-    start(projectId: string, targetLanguage: string): Promise<void> {
-      return invoke<void>('translate:start', projectId, targetLanguage);
+    start(projectId: string, targetLanguage: string, startMs?: number, endMs?: number): Promise<void> {
+      return invoke<void>('translate:start', projectId, targetLanguage, startMs, endMs);
+    },
+    reset(projectId: string): Promise<void> {
+      return invoke<void>('translate:reset', projectId);
     },
   },
 
   dub: {
-    start(clipId: string, voice: string, duckDb: number): Promise<void> {
-      return invoke<void>('dub:start', clipId, voice, duckDb);
+    start(clipId: string, voice: string, duckDb: number, customScript?: string): Promise<void> {
+      return invoke<void>('dub:start', clipId, voice, duckDb, customScript);
     },
   },
 
@@ -329,10 +375,16 @@ export const ipc = {
     generate(projectId: string, timestampMs: number): Promise<string | null> {
       return invoke<string | null>('thumbnail:generate', projectId, timestampMs);
     },
+    saveCustom(projectId: string, clipId: string, base64Data: string): Promise<string> {
+      return invoke<string>('thumbnail:save-custom', projectId, clipId, base64Data);
+    },
+    generateAi(projectId: string, frameBase64: string, title: string): Promise<string | null> {
+      return invoke<string | null>('thumbnail:generate-ai', projectId, frameBase64, title);
+    },
   },
 
   // -------------------------------------------------------------------------
-  // Settings
+  // Settings & Accounts / Presets
   // -------------------------------------------------------------------------
   settings: {
     get(): Promise<AppSettings> {
@@ -343,12 +395,75 @@ export const ipc = {
     },
   },
 
+  accounts: {
+    get(): Promise<import('../../shared/types').UploadAccount[]> {
+      return invoke<import('../../shared/types').UploadAccount[]>('accounts:get');
+    },
+    save(accounts: import('../../shared/types').UploadAccount[]): Promise<void> {
+      return invoke<void>('accounts:save', accounts);
+    },
+  },
+
+  presets: {
+    get(): Promise<import('../../shared/types').PreviewPreset[]> {
+      return invoke<import('../../shared/types').PreviewPreset[]>('presets:get');
+    },
+    save(presets: import('../../shared/types').PreviewPreset[]): Promise<void> {
+      return invoke<void>('presets:save', presets);
+    },
+  },
+
   // -------------------------------------------------------------------------
   // Dependencies
   // -------------------------------------------------------------------------
   deps: {
     check(): Promise<DepsCheckResult> {
       return invoke<DepsCheckResult>('deps:check');
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // Telegram Userbot
+  // -------------------------------------------------------------------------
+  telegram: {
+    sendCode(params: { apiId: number; apiHash: string; phoneNumber: string }): Promise<{ phoneCodeHash: string; tempSession: string }> {
+      return invoke('telegram:send-code', params);
+    },
+    signIn(params: { apiId: number; apiHash: string; phoneNumber: string; phoneCodeHash: string; phoneCode: string; tempSession: string; password?: string }): Promise<string> {
+      return invoke('telegram:sign-in', params);
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // YouTube discovery (search / trending)
+  // -------------------------------------------------------------------------
+  youtube: {
+    search(params: import('../../shared/types').YouTubeSearchParams): Promise<import('../../shared/types').YouTubeVideoResult[]> {
+      return invoke('youtube:search', params);
+    },
+    trending(params: import('../../shared/types').YouTubeTrendingParams): Promise<import('../../shared/types').YouTubeVideoResult[]> {
+      return invoke('youtube:trending', params);
+    },
+    analyzeTrend(params: { topic?: string; title?: string; description?: string; regionCode?: string; userScript?: string }): Promise<import('../../shared/types').TrendAnalysisResult> {
+      return invoke('youtube:analyze-trend', params);
+    },
+    optimizeGist(params: { topic: string; originalIdea?: string; userScript: string; durationSec?: number; clipId?: string; analyzeVisual?: boolean }): Promise<import('../../shared/types').GistOptimizationResult> {
+      return invoke('youtube:optimize-gist', params);
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // Clip.Cafe discovery
+  // -------------------------------------------------------------------------
+  clipCafe: {
+    search(query: string): Promise<import('../../shared/types').ClipCafeVideoResult[]> {
+      return invoke('clipcafe:search', query);
+    },
+    getGenreMovies(genre: string, page: number): Promise<import('../../shared/types').ClipCafeGenreMoviesResponse> {
+      return invoke('clipcafe:genre-movies', genre, page);
+    },
+    getMovieClips(movieUrl: string, page: number): Promise<import('../../shared/types').ClipCafeMovieClipsResponse> {
+      return invoke('clipcafe:movie-clips', movieUrl, page);
     },
   },
 
@@ -373,6 +488,26 @@ export const ipc = {
     },
     openFile(): Promise<string | null> {
       return invoke<string | null>('dialog:open-file');
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // AI Video Commentator
+  // -------------------------------------------------------------------------
+  commentator: {
+    generate(req: CommentatorRequest): Promise<CommentatorResult> {
+      return invoke<CommentatorResult>('commentator:generate', req);
+    },
+    getVoices(): Promise<unknown> {
+      return invoke('commentator:get-voices');
+    },
+    onProgress(
+      listener: (data: { percent: number; stage?: string; message?: string }) => void
+    ): () => void {
+      return subscribe<{ percent: number; stage?: string; message?: string }>(
+        'commentator:progress',
+        listener
+      );
     },
   },
 };

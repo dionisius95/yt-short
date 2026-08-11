@@ -7,13 +7,34 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
+import fs from 'fs';
 import path from 'path';
 import { BrowserWindow } from 'electron';
 import { CHANNELS } from '../ipc/channels';
 import { createLogger } from '../utils/logger';
 import type { DownloadRequest, DownloadProgress } from '../../shared/types';
+import type { ConfigManager } from '../config/ConfigManager';
 
 const log = createLogger('Downloader');
+
+function findYtDlpBinary(): string {
+  const userHome = process.env.USERPROFILE || process.env.HOME || '';
+  if (userHome) {
+    const candidatePaths = [
+      path.join(userHome, 'AppData', 'Local', 'Programs', 'Python', 'Python312', 'Scripts', 'yt-dlp.exe'),
+      path.join(userHome, 'AppData', 'Local', 'Microsoft', 'WinGet', 'Packages', 'yt-dlp.yt-dlp_Microsoft.Winget.Source_8wekyb3d8bbwe', 'yt-dlp.exe'),
+      path.join(userHome, 'AppData', 'Local', 'Programs', 'Python', 'Python311', 'Scripts', 'yt-dlp.exe'),
+      path.join(userHome, 'AppData', 'Local', 'Programs', 'Python', 'Python310', 'Scripts', 'yt-dlp.exe'),
+      path.join(userHome, 'AppData', 'Local', 'Microsoft', 'WinGet', 'Links', 'yt-dlp.exe'),
+    ];
+    for (const p of candidatePaths) {
+      if (fs.existsSync(p)) {
+        return p;
+      }
+    }
+  }
+  return 'yt-dlp';
+}
 
 // ---------------------------------------------------------------------------
 // Quality → yt-dlp format string mapping
@@ -75,6 +96,11 @@ function emitProgress(progress: DownloadProgress): void {
 export class Downloader {
   /** Map of projectId → active yt-dlp child process */
   private readonly processes = new Map<string, ChildProcess>();
+  private readonly config: ConfigManager | null;
+
+  constructor(config?: ConfigManager) {
+    this.config = config ?? null;
+  }
 
   /**
    * Download a video using yt-dlp.
@@ -85,7 +111,15 @@ export class Downloader {
   async download(
     req: DownloadRequest & { projectId: string },
   ): Promise<{ filePath: string; title: string; duration: number }> {
-    const format = QUALITY_FORMAT[req.quality] ?? QUALITY_FORMAT['1080p'];
+    const lowerUrl = req.url.toLowerCase();
+    const isGenericVideoSite =
+      lowerUrl.includes('.mp4') ||
+      lowerUrl.includes('clip.cafe/') ||
+      lowerUrl.includes('tiktok.com') ||
+      lowerUrl.includes('xiaohongshu.com') ||
+      lowerUrl.includes('xhslink.com') ||
+      lowerUrl.includes('rednote.com');
+    const format = isGenericVideoSite ? 'b' : (QUALITY_FORMAT[req.quality] ?? QUALITY_FORMAT['1080p']);
     const outputTemplate = path.join(req.outputDir, '%(id)s.%(ext)s');
 
     let lastError: Error | null = null;
@@ -155,12 +189,20 @@ export class Downloader {
         '--print', 'after_move:filepath',
         '--print-json',
         '--no-playlist',
-        req.url,
       ];
 
-      log.debug({ projectId: req.projectId, args }, 'Spawning yt-dlp');
+      // Pass browser cookies to bypass YouTube bot-detection when configured.
+      const cookiesBrowser = this.config?.get('ytDlpCookiesBrowser')?.trim();
+      if (cookiesBrowser) {
+        args.push('--cookies-from-browser', cookiesBrowser);
+      }
 
-      const proc = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      args.push(req.url);
+
+      const ytDlpCmd = findYtDlpBinary();
+      log.debug({ projectId: req.projectId, args, ytDlpCmd }, 'Spawning yt-dlp');
+
+      const proc = spawn(ytDlpCmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
       this.processes.set(req.projectId, proc);
 
       let jsonOutput = '';

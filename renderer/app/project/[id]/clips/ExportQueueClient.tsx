@@ -65,30 +65,45 @@ export default function ExportQueuePage() {
     }
   }, [projectId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    const handleUpdated = () => { void load(); };
+    window.addEventListener('clips:updated', handleUpdated);
+    return () => window.removeEventListener('clips:updated', handleUpdated);
+  }, [load]);
 
-  // Live clip progress — update status in-place
+  // Live clip progress — update status in-place or reload when new clip finishes
   useIpcEvent<{ clipId: string; percent: number; eta: string }>(
     'clip:progress',
     (data) => {
-      setClips((prev) =>
-        prev.map((c) => {
+      setClips((prev) => {
+        const exists = prev.some((c) => c.id === data.clipId);
+        if (!exists && data.percent >= 100) {
+          // New clip created in DB (e.g. commentary clip)
+          void load();
+          return prev;
+        }
+        return prev.map((c) => {
           if (c.id !== data.clipId) return c;
           if (data.percent < 0) return { ...c, status: 'failed' as const };
           if (data.percent >= 100) return { ...c, status: 'complete' as const };
           return { ...c, status: 'processing' as const };
-        })
-      );
+        });
+      });
       // Re-fetch clip to get outputPath when complete
       if (data.percent >= 100) {
         void ipc.clips.get(data.clipId).then((updated) => {
           if (updated) {
-            setClips((prev) => prev.map((c) => c.id === updated.id ? updated : c));
+            setClips((prev) => {
+              const exists = prev.some((c) => c.id === updated.id);
+              if (exists) return prev.map((c) => c.id === updated.id ? updated : c);
+              return [updated, ...prev];
+            });
           }
         }).catch(() => {/* ignore */});
       }
     },
-    [projectId]
+    [projectId, load]
   );
 
   // Export progress

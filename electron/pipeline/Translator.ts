@@ -54,7 +54,7 @@ function getLangName(code: string): string {
 export class Translator {
   /**
    * Translate transcript words to target language.
-   * Uses DeepL if API key provided, falls back to Ollama.
+   * Uses Google Translate (primary), falls back to DeepL, then Ollama.
    */
   async translate(
     words: TranscriptWord[],
@@ -65,18 +65,112 @@ export class Translator {
   ): Promise<TranscriptWord[]> {
     if (!words.length) return words;
 
+    log.info({ wordCount: words.length, targetLang }, 'Translating with Google Translate');
+    try {
+      const result = await this._translateGoogle(words, targetLang, onProgress);
+      log.info({ wordCount: result.length, targetLang }, 'Google Translate complete');
+      return result;
+    } catch (err) {
+      log.warn({ err: err instanceof Error ? err.message : String(err) }, 'Google Translate failed, falling back to DeepL/Ollama');
+    }
+
     if (deeplApiKey && deeplApiKey.trim()) {
       log.info({ wordCount: words.length, targetLang }, 'Translating with DeepL');
       try {
-        return await this._translateDeepL(words, targetLang, deeplApiKey, onProgress);
+        const result = await this._translateDeepL(words, targetLang, deeplApiKey, onProgress);
+        log.info({ wordCount: result.length, targetLang }, 'DeepL translation complete');
+        return result;
       } catch (err) {
-        log.warn({ err }, 'DeepL failed, falling back to Ollama');
+        log.warn({ err: err instanceof Error ? err.message : String(err) }, 'DeepL failed, falling back to Ollama');
       }
+    } else {
+      log.info({ targetLang }, 'No DeepL API key — using Ollama');
     }
 
     log.info({ wordCount: words.length, targetLang }, 'Translating with Ollama');
     await ensureOllamaRunning();
     return await this._translateOllama(words, targetLang, ollamaModel, onProgress);
+  }
+
+  private async _translateGoogle(
+    words: TranscriptWord[],
+    targetLang: string,
+    onProgress?: (pct: number) => void,
+  ): Promise<TranscriptWord[]> {
+    const sentences = this._groupIntoSentences(words);
+    const result: TranscriptWord[] = [...words];
+
+    const totalSentences = sentences.length;
+    let done = 0;
+
+    const batchSize = 50;
+    for (let i = 0; i < sentences.length; i += batchSize) {
+      const batch = sentences.slice(i, i + batchSize);
+      const texts = batch.map((s) => s.text);
+
+      const translated = await this._googleRequest(texts, targetLang);
+
+      for (let j = 0; j < batch.length; j++) {
+        const sentence = batch[j];
+        const translatedText = translated[j] ?? sentence.text;
+        const translatedWords = translatedText.trim().split(/\s+/);
+
+        for (let k = 0; k < sentence.wordIndices.length; k++) {
+          const wordIdx = sentence.wordIndices[k];
+          result[wordIdx] = {
+            ...words[wordIdx],
+            word: translatedWords[k] ?? translatedWords[translatedWords.length - 1] ?? words[wordIdx].word,
+          };
+        }
+      }
+
+      done += batch.length;
+      onProgress?.(Math.round((done / totalSentences) * 100));
+    }
+
+    return result;
+  }
+
+  private async _googleRequest(texts: string[], targetLang: string): Promise<string[]> {
+    log.info({ targetLang, textCount: texts.length }, 'Google Translate API request');
+    const joined = texts.join('\n');
+    const params = new URLSearchParams({
+      client: 'gtx',
+      sl: 'auto',
+      tl: targetLang,
+      dt: 't',
+      q: joined,
+    });
+
+    const response = await fetch('https://translate.googleapis.com/translate_a/single', {
+      method: 'POST',
+      body: params,
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      log.error({ status: response.status, body: err.slice(0, 300) }, 'Google Translate API error');
+      throw new Error(`Google Translate API error ${response.status}: ${err.slice(0, 200)}`);
+    }
+
+    const data = await response.json() as any[];
+    if (!data || !Array.isArray(data[0])) {
+      throw new Error('Invalid response structure from Google Translate');
+    }
+
+    const segments = data[0];
+    return texts.map((orig, idx) => {
+      const segment = segments[idx];
+      if (!segment) return orig;
+      let trans = segment[0];
+      if (trans.endsWith('\n') && !orig.endsWith('\n')) {
+        trans = trans.slice(0, -1);
+      }
+      return trans;
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -136,6 +230,8 @@ export class Translator {
       ? 'https://api-free.deepl.com/v2/translate'
       : 'https://api.deepl.com/v2/translate';
 
+    log.info({ targetLang, textCount: texts.length, endpoint: baseUrl.includes('free') ? 'free' : 'pro' }, 'DeepL API request');
+
     const body = JSON.stringify({
       text: texts,
       target_lang: targetLang,
@@ -153,6 +249,7 @@ export class Translator {
 
     if (!response.ok) {
       const err = await response.text();
+      log.error({ status: response.status, body: err.slice(0, 300) }, 'DeepL API error');
       throw new Error(`DeepL API error ${response.status}: ${err.slice(0, 200)}`);
     }
 

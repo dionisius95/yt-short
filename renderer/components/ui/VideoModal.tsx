@@ -24,9 +24,19 @@ export function VideoModal({ src, title, onClose }: VideoModalProps) {
     return () => window.removeEventListener('keydown', handler);
   }, [onClose]);
 
-  // Auto-play on open
+  // Auto-play on open and clean up on close
   useEffect(() => {
-    videoRef.current?.play().catch(() => {/* ignore autoplay block */});
+    const video = videoRef.current;
+    if (video) {
+      video.play().catch(() => {/* ignore autoplay block */});
+    }
+    return () => {
+      if (video) {
+        video.pause();
+        video.src = '';
+        video.load();
+      }
+    };
   }, []);
 
   return (
