@@ -117,8 +117,8 @@ if [ ! -f "$ASSETS/idle_driving.mp4" ]; then
   fi
 fi
 
-# --------- SELF-TEST: apakah SadTalker benar-benar bisa di-import? ---------
-echo "==> Self-test import SadTalker di stack modern ..."
+# --------- SELF-TEST: import + render nyata (diagnosa lengkap) ---------
+echo "==> Self-test 1/2: import SadTalker di stack modern ..."
 python3 - <<'PYEOF'
 import sys, traceback
 sys.path.insert(0, "/content/SadTalker")
@@ -132,6 +132,32 @@ try:
 except Exception:
     print("SADTALKER_IMPORT_FAILED")
     traceback.print_exc()
+PYEOF
+
+echo "==> Self-test 2/2: render nyata SadTalker (image contoh + audio diam) ..."
+python3 - <<'PYEOF'
+import subprocess, sys, os, glob
+os.chdir("/content/SadTalker")
+cands = sorted(glob.glob("/content/SadTalker/examples/source_image/*.*"))
+img = cands[0] if cands else None
+print("test image:", img)
+if img is None:
+    print("SADTALKER_RENDER_SKIP: tidak ada contoh gambar")
+    raise SystemExit(0)
+subprocess.run("ffmpeg -y -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono -t 1 /tmp/sil.wav", shell=True)
+r = subprocess.run([sys.executable, "inference.py",
+    "--source_image", img, "--driven_audio", "/tmp/sil.wav",
+    "--result_dir", "/tmp/sadout", "--still", "--preprocess", "full", "--size", "256"],
+    capture_output=True, text=True)
+print("RENDER_RETURN_CODE:", r.returncode)
+if r.returncode == 0:
+    print("SADTALKER_RENDER_OK")
+else:
+    print("SADTALKER_RENDER_FAILED")
+    print("=== STDERR tail ===")
+    print(r.stderr[-8000:])
+    print("=== STDOUT tail ===")
+    print(r.stdout[-2000:])
 PYEOF
 
 echo
