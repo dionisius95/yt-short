@@ -56,3 +56,19 @@ export const DEFAULT_AVATAR_OVERLAY: AvatarOverlay = {
 	margin: 48,
 	shape: 'circle',
 };
+
+// ---------------------------------------------------------------------------
+// Module augmentation (ADDITIVE)
+// Extend the existing shared IPC types WITHOUT editing the large types.ts.
+// These are type-only and erased at compile time, so runtime is unaffected.
+// ---------------------------------------------------------------------------
+declare module './types' {
+	interface CommentatorRequest {
+		/** Optional talking-avatar overlay. Omitted/disabled => pipeline unchanged. */
+		avatar?: AvatarOverlay;
+	}
+	interface AppSettings {
+		/** Optional dedicated avatar engine base URL. Empty => falls back to xttsColabUrl. */
+		avatarColabUrl?: string;
+	}
+}

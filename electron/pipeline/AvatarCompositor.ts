@@ -1,0 +1,148 @@
+/**
+ * AvatarCompositor — overlays per-segment talking-avatar clips onto an
+ * already-rendered commentary video using a single FFmpeg pass.
+ *
+ * ADDITIVE & SAFE: it writes to a temp file and only renames over the original
+ * on success, so any failure leaves the rendered commentary video untouched.
+ * Processor.ts is intentionally not modified; this runs as a post step.
+ */
+import fs from 'fs';
+import { spawn } from 'child_process';
+import type { AvatarOverlay } from '../../shared/avatarTypes';
+
+// Prefer a bundled ffmpeg if available; otherwise fall back to PATH.
+let ffmpegPath = 'ffmpeg';
+try {
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const stat = require('ffmpeg-static');
+	if (stat && typeof stat === 'string') ffmpegPath = stat;
+} catch {
+	/* use PATH ffmpeg */
+}
+
+export interface AvatarSegment {
+	clipPath: string;
+	startSec: number;
+	endSec: number;
+}
+
+export interface AvatarCompositeArgs {
+	inputVideoPath: string;
+	avatar: AvatarOverlay;
+	segments: AvatarSegment[];
+	/** Canvas width used to size the avatar (default 1080). */
+	canvasW?: number;
+}
+
+export class AvatarCompositor {
+	async composite(args: AvatarCompositeArgs): Promise<void> {
+		const { inputVideoPath, avatar } = args;
+		const canvasW = args.canvasW ?? 1080;
+		const segments = (args.segments || []).filter(
+			(s) => s.clipPath && fs.existsSync(s.clipPath) && s.endSec > s.startSec,
+		);
+		if (segments.length === 0) return;
+
+		const avatarW = Math.max(2, Math.round(canvasW * avatar.scale));
+		const r = Math.round(avatarW / 2);
+		const rr = r * r;
+
+		// Build inputs: main video first, then each avatar clip time-shifted so it
+		// starts at its segment boundary on the main timeline.
+		const inputs: string[] = ['-i', inputVideoPath];
+		segments.forEach((seg) => {
+			inputs.push('-itsoffset', seg.startSec.toFixed(3), '-i', seg.clipPath);
+		});
+
+		const filters: string[] = [];
+		let last = '[0:v]';
+		segments.forEach((seg, i) => {
+			const idx = i + 1; // ffmpeg input index (0 is the main video)
+			const av = `av${i}`;
+			if (avatar.shape === 'circle') {
+				filters.push(
+					`[${idx}:v]scale=${avatarW}:${avatarW}:force_original_aspect_ratio=increase,` +
+						`crop=${avatarW}:${avatarW},format=rgba,` +
+						`geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':` +
+						`a='if(gt((X-${r})*(X-${r})+(Y-${r})*(Y-${r})\\,${rr})\\,0\\,255)'[${av}]`,
+				);
+			} else {
+				filters.push(`[${idx}:v]scale=${avatarW}:-1[${av}]`);
+			}
+			const pos = this.position(avatar);
+			const out = i === segments.length - 1 ? '[vout]' : `[v${i}]`;
+			filters.push(
+				`${last}[${av}]overlay=${pos.x}:${pos.y}:` +
+					`enable='between(t\\,${seg.startSec.toFixed(3)}\\,${seg.endSec.toFixed(3)})'${out}`,
+			);
+			last = `[v${i}]`;
+		});
+
+		const tmpOut = inputVideoPath.replace(/\.mp4$/i, '') + '.avatar.tmp.mp4';
+		const ffArgs = [
+			'-y',
+			...inputs,
+			'-filter_complex',
+			filters.join(';'),
+			'-map',
+			'[vout]',
+			'-map',
+			'0:a?',
+			'-c:v',
+			'libx264',
+			'-crf',
+			'18',
+			'-preset',
+			'veryfast',
+			'-pix_fmt',
+			'yuv420p',
+			'-movflags',
+			'+faststart',
+			'-c:a',
+			'copy',
+			tmpOut,
+		];
+
+		await this.run(ffArgs);
+		fs.renameSync(tmpOut, inputVideoPath);
+	}
+
+	/** Overlay position expressions using FFmpeg main (W/H) and overlay (w/h) vars. */
+	private position(a: AvatarOverlay): { x: string; y: string } {
+		const m = a.margin ?? 48;
+		if (typeof a.x === 'number' && typeof a.y === 'number') {
+			return { x: `${a.x}`, y: `${a.y}` };
+		}
+		switch (a.position) {
+			case 'top-left':
+				return { x: `${m}`, y: `${m}` };
+			case 'top-right':
+				return { x: `W-w-${m}`, y: `${m}` };
+			case 'bottom-left':
+				return { x: `${m}`, y: `H-h-${m}` };
+			case 'bottom-right':
+				return { x: `W-w-${m}`, y: `H-h-${m}` };
+			case 'center':
+				return { x: `(W-w)/2`, y: `(H-h)/2` };
+			default:
+				return { x: `W-w-${m}`, y: `${m}` };
+		}
+	}
+
+	private run(ffArgs: string[]): Promise<void> {
+		return new Promise((resolve, reject) => {
+			const proc = spawn(ffmpegPath, ffArgs, {
+				stdio: ['ignore', 'ignore', 'pipe'],
+			});
+			let err = '';
+			proc.stderr.on('data', (d) => {
+				err += d.toString();
+			});
+			proc.on('error', reject);
+			proc.on('close', (code) => {
+				if (code === 0) resolve();
+				else reject(new Error(`ffmpeg avatar composite failed (${code}): ${err.slice(-2000)}`));
+			});
+		});
+	}
+}

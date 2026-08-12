@@ -13,8 +13,11 @@ import { CommentatorAnalyzer } from './CommentatorAnalyzer';
 import { Dubber } from './Dubber';
 import { Processor } from './Processor';
 import { Transcriber } from './Transcriber';
+import { AvatarGenerator } from './AvatarGenerator';
+import { AvatarCompositor } from './AvatarCompositor';
 import { createLogger } from '../utils/logger';
 import type { CommentatorRequest, CommentatorResult, TranscriptWord } from '../../shared/types';
+import type { AvatarClips } from '../../shared/avatarTypes';
 
 const log = createLogger('CommentatorPipeline');
 
@@ -23,6 +26,8 @@ export class CommentatorPipeline {
   private dubber = new Dubber();
   private processor = new Processor();
   private transcriber = new Transcriber();
+  private avatarGen = new AvatarGenerator();
+  private compositor = new AvatarCompositor();
 
   async processCommentary(
     req: CommentatorRequest,
@@ -127,6 +132,7 @@ export class CommentatorPipeline {
     // 5b. For Mode 3 (hook_replay_outro), generate educational takeaway TTS for Segment C
     let takeawayTtsPath = '';
     let takeawayAlignedWords: TranscriptWord[] = [];
+    let takeawayDurationMs = 0;
     if (is3Segment) {
       this._emitProgress(78, 'takeaway', 'Generating Segment C educational takeaway TTS outro...');
       const takeawayText = (scriptResult.takeawayText || 'Remember, every challenge in life is an opportunity to learn and grow!').trim();
@@ -150,6 +156,7 @@ export class CommentatorPipeline {
         takeawayTtsPath = takeawayResult.ttsTrackPath;
         let actualTakeawayDurMs = takeawayDurMs;
         try { actualTakeawayDurMs = await this.processor.getVideoDurationMs(takeawayTtsPath); } catch {}
+        takeawayDurationMs = actualTakeawayDurMs;
 
         takeawayAlignedWords = (actualTakeawayDurMs > 0 && actualTakeawayDurMs !== takeawayDurMs)
           ? this._textToTranscriptWords(takeawayText, actualTakeawayDurMs)
@@ -234,6 +241,61 @@ export class CommentatorPipeline {
       }
     }
 
+    // 5d. Talking-avatar clips (ADDITIVE, guarded). Only for 3-segment mode.
+    //     A/C = talk (lip-sync from TTS), B = idle (silent, blinking). Any
+    //     failure leaves avatarClips undefined so the render is unchanged.
+    let avatarClips: AvatarClips | undefined;
+    let avatarSegASec = 0;
+    let avatarSegBSec = 0;
+    let avatarSegCSec = 0;
+    if (is3Segment && req.avatar?.enabled && req.avatar.imagePath && fs.existsSync(req.avatar.imagePath)) {
+      try {
+        const baseUrl = AvatarGenerator.resolveBaseUrl(req.avatar, apiKeys.xttsColabUrl);
+        if (!baseUrl) throw new Error('avatar base URL empty (set avatarColabUrl / xttsColabUrl)');
+        this._emitProgress(84, 'avatar', 'Generating talking avatar clips...');
+        const dir = outputDir || path.dirname(videoPath);
+        const clips: AvatarClips = {};
+
+        // Segment A (hook) -> talk
+        clips.segmentA = await this.avatarGen.generate({
+          imagePath: req.avatar.imagePath,
+          audioPath: ttsTrackPath,
+          mode: 'talk',
+          baseUrl,
+          outputPath: path.join(dir, 'avatar_segA.mp4'),
+        });
+        avatarSegASec = (actualTtsDurMs || ttsDurationMs) / 1000;
+
+        // Segment C (takeaway) -> talk
+        if (takeawayTtsPath) {
+          clips.segmentC = await this.avatarGen.generate({
+            imagePath: req.avatar.imagePath,
+            audioPath: takeawayTtsPath,
+            mode: 'talk',
+            baseUrl,
+            outputPath: path.join(dir, 'avatar_segC.mp4'),
+          });
+          avatarSegCSec = (takeawayDurationMs || 0) / 1000;
+        }
+
+        // Segment B (replay) -> idle (silent but blinking/expressive)
+        clips.segmentB = await this.avatarGen.generate({
+          imagePath: req.avatar.imagePath,
+          audioPath: null,
+          mode: 'idle',
+          baseUrl,
+          outputPath: path.join(dir, 'avatar_segB.mp4'),
+          durationSec: Math.max(1, Math.round(durationMs / 1000)),
+        });
+        avatarSegBSec = durationMs / 1000;
+
+        avatarClips = clips;
+      } catch (avErr) {
+        log.warn({ avErr }, 'Avatar generation failed; rendering without avatar');
+        avatarClips = undefined;
+      }
+    }
+
     // 6. Define output file path
     const targetDir = outputDir || path.dirname(videoPath);
     const basename = path.basename(videoPath, path.extname(videoPath));
@@ -271,6 +333,33 @@ export class CommentatorPipeline {
     });
 
     log.info({ outputPath }, 'Successfully generated commentary video');
+
+    // 7b. Overlay talking-avatar clips onto the rendered video (ADDITIVE, guarded).
+    //     Composites to a temp file and only replaces the original on success,
+    //     so any failure keeps the standard commentary output intact.
+    if (avatarClips && req.avatar) {
+      try {
+        this._emitProgress(96, 'avatar', 'Compositing talking avatar overlay...');
+        const segments: Array<{ clipPath: string; startSec: number; endSec: number }> = [];
+        let cursor = 0;
+        if (avatarClips.segmentA) {
+          segments.push({ clipPath: avatarClips.segmentA, startSec: cursor, endSec: cursor + avatarSegASec });
+        }
+        cursor += avatarSegASec;
+        if (avatarClips.segmentB) {
+          segments.push({ clipPath: avatarClips.segmentB, startSec: cursor, endSec: cursor + avatarSegBSec });
+        }
+        cursor += avatarSegBSec;
+        if (avatarClips.segmentC) {
+          segments.push({ clipPath: avatarClips.segmentC, startSec: cursor, endSec: cursor + avatarSegCSec });
+        }
+        await this.compositor.composite({ inputVideoPath: outputPath, avatar: req.avatar, segments });
+        log.info('Avatar overlay composited successfully');
+      } catch (compErr) {
+        log.warn({ compErr }, 'Avatar compositing failed; keeping original commentary video');
+      }
+    }
+
     this._emitProgress(100, 'done', 'Commentary video generation complete!');
 
     return {
