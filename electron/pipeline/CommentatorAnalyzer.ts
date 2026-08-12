@@ -113,7 +113,7 @@ CRITICAL RULE — TRANSFORMATIVE ADDED VALUE (NEVER NARRATE THE OBVIOUS):
 HARD CONSTRAINTS:
 ═══════════════════════════════════════
 1. VIDEO DURATION: ${durationSec} seconds.
-2. WORD LIMIT: MAXIMUM ${maxWords} words total. Keep it concise, energetic, and punchy.
+2. WORD LIMIT: MAXIMUM ${maxWords} words for the on-screen commentary (hookText + scriptText). The closing outro (takeawayText) is SEPARATE and is NOT counted in this limit — give it room to breathe.
 3. FINISH EARLY: Commentary MUST end by second ${durationSec - 3}. Leave 3s clean gap at the end.
 4. SHORT SENTENCES: Max 12 words per sentence. Punchy fragments are encouraged.
 
@@ -154,20 +154,29 @@ FULL SCRIPT (scriptText):
 - NO filler words, NO visual redundancy. Every word must add entertainment or educational value.
 
 ═══════════════════════════════════════
-TAKEAWAY (takeawayText) — CLOSING 3-5 SECONDS:
+TAKEAWAY / OUTRO (takeawayText) — THE CLOSING PAYOFF (~9-14 SECONDS, DON'T RUSH IT):
 ═══════════════════════════════════════
-Closing line must be a sharp, witty, or relatable wrap-up — NOT a preachy motivational poster.
+This is the part that makes people feel something and hit the comments. A single one-liner is TOO FAST — the viewer never actually lands the point before the video ends. Give it real room.
 
-GREAT TAKEAWAY ENERGIES:
-✓ "And that is why you always check twice before doing something this bold."
-✓ "Legend has it he's still trying to figure out what just happened."
-✓ "Moral of the story: never underestimate a person with nothing to lose."
+Write 3-5 full, flowing sentences (roughly 30-55 words) in this shape:
+1. LAND THE REAL TAKEAWAY clearly — the "so what" of the whole clip. Make the viewer go "ohh, THAT'S the point." Don't be vague; say what it actually means.
+2. ADD ONE MORE BEAT — a sharp observation, a relatable twist, or a tiny bit of context that makes the point stick and feel earned.
+3. END WITH A NATURAL QUESTION that genuinely pulls the audience in and asks for THEIR opinion — like you actually want to hear what they think. It must feel like something you'd really say to a friend, NOT a forced call-to-action.
+
+The closing question MUST match the audience's language (write it in casual Indonesian for an ID audience, natural English for US/UK).
+
+GREAT CLOSING ENERGIES (notice they LAND the point first, THEN invite opinions naturally):
+✓ "...and honestly, that's the part nobody talks about. We all like to think we'd stay calm in that moment — but would we really? I'm genuinely curious, would YOU have done the same thing? Tell me in the comments, I need to know I'm not the only one."
+✓ "...so yeah — tiny choice, massive consequences. Kinda makes you wonder how often this happens and we just don't notice. What would you have done in his shoes? Drop your take below, let's argue about it."
+✓ "...jadi intinya, jangan pernah remehin orang yang udah nggak punya apa-apa buat dijaga. Tapi mungkin gue yang salah baca situasinya. Menurut lo gimana? Komen dong, gue pengin tau kalian di tim yang mana."
+
+BANNED CLOSING PHRASES (too robotic / screams AI or spam): "comment below", "like and subscribe", "let us know in the comments", "don't forget to", "thanks for watching", "smash that like button".
 
 Return ONLY a JSON object (no markdown, no text outside JSON):
 {
   "hookText": "1-3 second hook — intriguing & specific",
   "scriptText": "Full transformative voiceover script",
-  "takeawayText": "3-5 second witty/insightful closing line",
+  "takeawayText": "Longer ~9-14s closing outro (3-5 sentences): first land the real takeaway/message clearly, add one extra beat, then END with a natural question that asks the audience for their opinion in their own language — never robotic",
   "segments": [
     {
       "text": "Segment sentence",
@@ -259,7 +268,7 @@ Return ONLY a JSON object (no markdown, no text outside JSON):
     let lastError: Error | null = null;
 
     for (const model of models) {
-      const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/${model}:generateContent`;
+      const url = `{{https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}}}/locations/us-central1/publishers/google/models/${model}:generateContent`;
 
       const payload = {
         contents: [
@@ -351,7 +360,7 @@ Return ONLY a JSON object (no markdown, no text outside JSON):
       const parsed = JSON.parse(cleaned);
       const hookText = parsed.hookText || 'Okay, you need to see this part.';
       const scriptText = parsed.scriptText || parsed.segments?.map((s: any) => s.text).join(' ') || hookText;
-      const takeawayText = parsed.takeawayText || "Yeah... I still can't believe that actually happened.";
+      const takeawayText = parsed.takeawayText || "Yeah... I still can't fully wrap my head around this one, honestly. The more you think about it, the crazier it gets. So I gotta ask — what would YOU have done in that exact moment? Drop it in the comments, I really wanna know where you stand.";
 
       let segments: CommentatorScriptSegment[] = parsed.segments || [];
       if (segments.length === 0) {
