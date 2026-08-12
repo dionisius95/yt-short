@@ -11,6 +11,8 @@ import { ipc } from '../../lib/ipc-client';
 import type { CaptionPresetId, CaptionStyle, CaptionFont, SubtitlePosition, CommentatorVoiceProvider, CommentatorTransitionEffect } from '../../../shared/types';
 import { CAPTION_PRESETS } from '../../../shared/types';
 import { cn } from '../../lib/utils';
+import { AvatarControls } from '../project/AvatarControls';
+import { DEFAULT_AVATAR_OVERLAY, type AvatarOverlay } from '../../../shared/avatarTypes';
 
 interface CommentatorModalProps {
   videoPath: string;
@@ -112,6 +114,7 @@ export function CommentatorModal({ videoPath, clipId, projectId, initialPresetId
   const [customThumbnailPath, setCustomThumbnailPath] = useState<string>('');
   const [brandingLogoPath, setBrandingLogoPath] = useState<string>('');
   const [speakerAudioPath, setSpeakerAudioPath] = useState<string>('');
+  const [avatar, setAvatar] = useState<AvatarOverlay>(DEFAULT_AVATAR_OVERLAY);
 
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -240,6 +243,10 @@ export function CommentatorModal({ videoPath, clipId, projectId, initialPresetId
         customThumbnailPath: customThumbnailPath || undefined,
         brandingLogoPath: brandingLogoPath || undefined,
         speakerAudioPath: speakerAudioPath || undefined,
+        avatar:
+          commentaryMode === 'hook_replay_outro' && avatar.enabled && avatar.imagePath
+            ? avatar
+            : undefined,
       }) as any;
 
       if (result && result.outputPath) {
@@ -528,6 +535,19 @@ export function CommentatorModal({ videoPath, clipId, projectId, initialPresetId
                   )}
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Talking Avatar (3-segment mode only) */}
+          {commentaryMode === 'hook_replay_outro' && (
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-text-secondary mb-2">
+                Talking Avatar
+              </label>
+              <AvatarControls value={avatar} onChange={setAvatar} />
+              <p className="text-[10px] text-text-secondary mt-2">
+                Avatar berbicara & berkedip di Segmen A (hook) dan C (takeaway), diam namun tetap berkedip natural di Segmen B (replay). Fitur tambahan opsional — tidak mengubah pipeline commentary yang sudah ada saat toggle dimatikan.
+              </p>
             </div>
           )}
 
