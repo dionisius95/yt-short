@@ -135,7 +135,7 @@ export class AvatarCompositor {
 				stdio: ['ignore', 'ignore', 'pipe'],
 			});
 			let err = '';
-			proc.stderr.on('data', (d) => {
+			proc.stderr?.on('data', (d) => {
 				err += d.toString();
 			});
 			proc.on('error', reject);
