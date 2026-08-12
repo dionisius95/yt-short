@@ -30,6 +30,30 @@ if [ ! -d "$WORK/SadTalker/checkpoints" ] || [ -z "$(ls -A "$WORK/SadTalker/chec
   ( cd "$WORK/SadTalker" && bash scripts/download_models.sh ) || echo "WARN: download_models.sh gagal sebagian"
 fi
 
+# Verifikasi checkpoint safetensors tidak korup ("header too small" = file terpotong).
+# download_models.sh pakai wget -nc, jadi file yang gagal separuh tidak pernah diunduh ulang.
+echo "==> Verifikasi & perbaiki checkpoint SadTalker"
+python3 - <<'CKEOF'
+import os, urllib.request
+base = "https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/"
+ckpt = "/content/SadTalker/checkpoints"
+os.makedirs(ckpt, exist_ok=True)
+need = ["SadTalker_V0.0.2_256.safetensors", "SadTalker_V0.0.2_512.safetensors"]
+MIN = 1_000_000  # file valid >> 1MB; file korup/HTML jauh lebih kecil
+for f in need:
+    p = os.path.join(ckpt, f)
+    sz = os.path.getsize(p) if os.path.isfile(p) else 0
+    if sz >= MIN:
+        print("[ckpt] OK:", f, sz); continue
+    print("[ckpt] KORUP/HILANG (", sz, "b) -> unduh ulang:", f)
+    try:
+        if os.path.isfile(p): os.remove(p)
+        urllib.request.urlretrieve(base + f, p)
+        print("[ckpt] terunduh:", os.path.getsize(p))
+    except Exception as e:
+        print("[ckpt] GAGAL unduh", f, "->", e)
+CKEOF
+
 echo "==> Tulis shim kompatibilitas SadTalker (numpy2 / torchvision0.17+ / torch2.6)"
 cat > "$WORK/SadTalker/pippit_compat.py" <<'PYEOF'
 # Auto-generated shim: bikin SadTalker (2023) jalan di stack modern Colab.
@@ -167,7 +191,7 @@ if img is None:
 subprocess.run("ffmpeg -y -loglevel error -f lavfi -i anullsrc=r=16000:cl=mono -t 1 /tmp/sil.wav", shell=True)
 r = subprocess.run([sys.executable, "inference.py",
     "--source_image", img, "--driven_audio", "/tmp/sil.wav",
-    "--result_dir", "/tmp/sadout", "--still", "--preprocess", "full", "--size", "256"],
+    "--result_dir", "/tmp/sadout", "--still", "--preprocess", "full", "--size", "512"],
     capture_output=True, text=True)
 print("RENDER_RETURN_CODE:", r.returncode)
 if r.returncode == 0:
