@@ -59,14 +59,49 @@ cat > "$WORK/SadTalker/pippit_compat.py" <<'PYEOF'
 # Auto-generated shim: bikin SadTalker (2023) jalan di stack modern Colab.
 # Diimpor paling atas oleh inference.py (dan self-test) sebelum modul lain.
 import sys
+import warnings
 
-# 1) numpy alias lama (np.float / np.int / ... dihapus di numpy>=1.24 & 2.x)
+# 1) numpy: kembalikan nama lama yang dihapus di numpy>=1.24 & numpy 2.x.
+#    Dibungkus catch_warnings supaya FutureWarning hasattr tidak berisik.
 try:
     import numpy as _np
-    for _n, _t in {"float": float, "int": int, "bool": bool, "object": object,
-                   "str": str, "complex": complex, "long": int, "unicode": str}.items():
-        if not hasattr(_np, _n):
-            setattr(_np, _n, _t)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # 1a) alias skalar lama (np.float/np.int/np.bool/np.object/np.str/...)
+        _scalars = {"float": float, "int": int, "bool": bool, "object": object,
+                    "str": str, "complex": complex, "long": int, "unicode": str,
+                    "float_": getattr(_np, "float64", float),
+                    "complex_": getattr(_np, "complex128", complex),
+                    "unicode_": getattr(_np, "str_", str)}
+        for _n, _t in _scalars.items():
+            if not hasattr(_np, _n):
+                try:
+                    setattr(_np, _n, _t)
+                except Exception:
+                    pass
+        # 1b) kelas warning/exception yang pindah ke numpy.exceptions di numpy 2.0
+        _exc = getattr(_np, "exceptions", None)
+        for _wn in ("VisibleDeprecationWarning", "ComplexWarning",
+                    "ModuleDeprecationWarning", "RankWarning",
+                    "TooHardError", "AxisError", "DTypePromotionError"):
+            if not hasattr(_np, _wn):
+                _c = getattr(_exc, _wn, None) if _exc is not None else None
+                if _c is None:
+                    _c = DeprecationWarning if _wn.endswith("Warning") else Exception
+                try:
+                    setattr(_np, _wn, _c)
+                except Exception:
+                    pass
+        # 1c) konstanta float lama yang dihapus/diganti di numpy 2.0
+        _consts = {"NaN": _np.nan, "NAN": _np.nan, "Inf": _np.inf,
+                   "Infinity": _np.inf, "infty": _np.inf, "PINF": _np.inf,
+                   "NINF": -_np.inf, "PZERO": 0.0, "NZERO": -0.0}
+        for _cn, _cv in _consts.items():
+            if not hasattr(_np, _cn):
+                try:
+                    setattr(_np, _cn, _cv)
+                except Exception:
+                    pass
 except Exception as _e:
     print("[pippit_compat] numpy shim warn:", _e, flush=True)
 
