@@ -144,6 +144,43 @@ def _newest_mp4(root: Path):
     return vids[0] if vids else None
 
 
+def _probe_duration(path: Path) -> float:
+    """Durasi video (detik) via ffprobe; 0.0 kalau gagal."""
+    try:
+        r = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=nw=1:nk=1', str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60,
+        )
+        return float((r.stdout.decode('utf-8', 'ignore') or '0').strip() or 0)
+    except Exception:
+        return 0.0
+
+
+def _loop_to_duration(src: Path, dst: Path, seconds: float, fps: int) -> Path:
+    """Perpanjang klip idle agar sepanjang `seconds` dengan PING-PONG loop
+    (maju + mundur) supaya transisi mulus tanpa lompatan, gerak kedip/senyum
+    berulang natural. Kalau `src` sudah cukup panjang, cukup di-trim."""
+    seconds = max(0.5, float(seconds))
+    dur = _probe_duration(src)
+    if dur <= 0:
+        return src
+    if dur >= seconds - 0.05:
+        _run(['ffmpeg', '-y', '-i', str(src), '-t', '%.2f' % seconds,
+              '-r', str(fps), '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+              '-an', str(dst)])
+        return dst
+    # 1) unit ping-pong = maju lalu dibalik (boomerang) -> loopable mulus
+    pp = dst.with_name('idle_pingpong.mp4')
+    _run(['ffmpeg', '-y', '-i', str(src), '-filter_complex',
+          '[0:v]fps=' + str(fps) + ',split[a][b];[b]reverse[r];[a][r]concat=n=2:v=1[v]',
+          '-map', '[v]', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(pp)])
+    # 2) ulang unit ping-pong sampai >= seconds lalu trim tepat
+    _run(['ffmpeg', '-y', '-stream_loop', '-1', '-i', str(pp), '-t', '%.2f' % seconds,
+          '-r', str(fps), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', str(dst)])
+    return dst
+
+
 def _sadtalker_available() -> bool:
     return SADTALKER_DIR.exists() and (SADTALKER_DIR / 'inference.py').exists()
 
@@ -206,17 +243,21 @@ def _render_liveportrait_idle(image: Path, out_dir: Path, seconds: float, fps: i
     if not IDLE_DRIVING or not Path(IDLE_DRIVING).exists():
         raise RuntimeError('no IDLE_DRIVING clip configured')
     out_dir.mkdir(parents=True, exist_ok=True)
+    _free_cuda()
+    # Retarget SEKALI dari klip driving pendek -> idle natural (kedip/senyum/gerak).
     cmd = [
         sys.executable, 'inference.py',
         '-s', str(image),
         '-d', str(IDLE_DRIVING),
         '-o', str(out_dir),
     ]
-    _run(cmd, cwd=LIVEPORTRAIT_DIR, timeout=600)
-    vid = _newest_mp4(out_dir)
-    if not vid:
+    _run(cmd, cwd=LIVEPORTRAIT_DIR, timeout=900)
+    base = _newest_mp4(out_dir)
+    if not base:
         raise RuntimeError('LivePortrait produced no mp4')
-    return vid
+    # Loop ping-pong hingga sepanjang durasi Segmen B (bukan freeze 3 detik).
+    looped = _loop_to_duration(base, out_dir / 'idle_full.mp4', seconds, fps)
+    return looped
 
 
 def _handle_avatar():
@@ -252,6 +293,8 @@ def _handle_avatar():
                 sil = job / 'silence.wav'
                 _make_silent_wav(sil, duration, fps)
                 vid = _render_sadtalker(img_path, sil, out_dir, fps)
+                # Samakan panjang dengan durasi segmen (loop kalau kurang).
+                vid = _loop_to_duration(vid, out_dir / 'idle_full.mp4', duration, fps)
         else:
             aud_path = job / 'drive.wav'
             aud_path.write_bytes(base64.b64decode(audio_b64))
