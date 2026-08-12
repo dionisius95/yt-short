@@ -394,6 +394,38 @@ export class CommentatorPipeline {
       }
     }
 
+    // 8. Write a diagnostics sidecar next to the output so avatar/subtitle
+    //    issues can be inspected without reading console logs. Non-fatal.
+    try {
+      const debugInfo = {
+        timestamp: new Date().toISOString(),
+        commentaryMode: req.commentaryMode || 'full',
+        is3Segment,
+        avatar: {
+          requested: !!req.avatar,
+          enabled: !!req.avatar?.enabled,
+          imagePath: req.avatar?.imagePath || null,
+          imageExists: req.avatar?.imagePath ? fs.existsSync(req.avatar.imagePath) : false,
+          resolvedBaseUrl: req.avatar ? AvatarGenerator.resolveBaseUrl(req.avatar, apiKeys.xttsColabUrl) : null,
+          generated: !!avatarClips,
+          segmentAExists: avatarClips?.segmentA ? fs.existsSync(avatarClips.segmentA) : false,
+          segmentBExists: avatarClips?.segmentB ? fs.existsSync(avatarClips.segmentB) : false,
+          segmentCExists: avatarClips?.segmentC ? fs.existsSync(avatarClips.segmentC) : false,
+          error: avatarErrorMsg || null,
+        },
+        segmentBSubtitles: {
+          providedWordCount: Array.isArray(req.originalTranscriptWords) ? req.originalTranscriptWords.length : 0,
+          finalWordCount: segBOriginalWords.length,
+          usedTranscriptionFallback: !(Array.isArray(req.originalTranscriptWords) && req.originalTranscriptWords.length > 0) && segBOriginalWords.length > 0,
+        },
+        outputPath,
+      };
+      fs.writeFileSync(`${outputPath}.debug.json`, JSON.stringify(debugInfo, null, 2), 'utf-8');
+      log.info({ debugInfo }, 'Commentary debug diagnostics written');
+    } catch (dbgErr) {
+      log.warn({ dbgErr }, 'Failed to write commentary debug sidecar');
+    }
+
     this._emitProgress(
       100,
       'done',
