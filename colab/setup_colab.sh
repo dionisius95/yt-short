@@ -97,6 +97,26 @@ for kw in float int bool object str complex; do
     | xargs -0 -r sed -i -E "s/\bnp\.${kw}\b/${kw}/g" 2>/dev/null || true
 done
 
+# Patch align_img: numpy>=1.24 tolak array ragged (w0,h0,s skalar + t[0],t[1] array).
+echo "==> Patch SadTalker align_img (numpy ragged-array fix)"
+python3 - <<'PYEOF'
+import io
+p = "/content/SadTalker/src/face3d/util/preprocess.py"
+try:
+    src = io.open(p, encoding="utf-8").read()
+except FileNotFoundError:
+    print("[patch] WARN: preprocess.py tidak ditemukan"); raise SystemExit(0)
+old = "trans_params = np.array([w0, h0, s, t[0], t[1]])"
+new = "trans_params = np.array([float(w0), float(h0), float(np.asarray(s).reshape(-1)[0]), float(np.asarray(t).reshape(-1)[0]), float(np.asarray(t).reshape(-1)[1])])"
+if new in src:
+    print("[patch] align_img: sudah dipatch")
+elif old in src:
+    io.open(p, "w", encoding="utf-8").write(src.replace(old, new))
+    print("[patch] align_img: FIXED")
+else:
+    print("[patch] align_img: pola tidak ditemukan (mungkin versi beda)")
+PYEOF
+
 # --------- LivePortrait (mode idle: B) ---------
 if [ ! -d "$WORK/LivePortrait" ]; then
   echo "==> Clone LivePortrait"
