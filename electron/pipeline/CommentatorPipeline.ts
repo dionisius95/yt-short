@@ -244,6 +244,7 @@ export class CommentatorPipeline {
     // 5d. Talking-avatar clips (ADDITIVE, guarded). Only for 3-segment mode.
     //     A/C = talk (lip-sync from TTS), B = idle (silent, blinking). Any
     //     failure leaves avatarClips undefined so the render is unchanged.
+    let avatarErrorMsg = '';
     let avatarClips: AvatarClips | undefined;
     let avatarSegASec = 0;
     let avatarSegBSec = 0;
@@ -291,8 +292,40 @@ export class CommentatorPipeline {
 
         avatarClips = clips;
       } catch (avErr) {
-        log.warn({ avErr }, 'Avatar generation failed; rendering without avatar');
+        avatarErrorMsg = avErr instanceof Error ? avErr.message : String(avErr);
+        log.error({ avErr, avatarColabUrl: AvatarGenerator.resolveBaseUrl(req.avatar, apiKeys.xttsColabUrl) }, 'Avatar generation failed; rendering without avatar');
         avatarClips = undefined;
+      }
+    }
+
+    // 5e. Segment B raw-dialogue subtitles fallback (ADDITIVE, guarded).
+    //     If no original transcript words were supplied (e.g. the source was
+    //     never transcribed), transcribe the raw clip so Segment B still shows
+    //     the original conversation subtitles. Non-fatal on failure.
+    let segBOriginalWords: TranscriptWord[] = Array.isArray(req.originalTranscriptWords)
+      ? req.originalTranscriptWords
+      : [];
+    if (is3Segment && segBOriginalWords.length === 0 && fs.existsSync(videoPath)) {
+      try {
+        this._emitProgress(86, 'subtitle', 'Transcribing raw clip for Segment B conversation subtitles...');
+        const rawStt = await this.transcriber.transcribe(
+          'segmentb-raw',
+          videoPath,
+          'en',
+          apiKeys.whisperModelSize || 'small',
+          undefined,
+          undefined,
+          undefined,
+          apiKeys.googleServiceAccountPath,
+        );
+        if (rawStt?.words && rawStt.words.length > 0) {
+          segBOriginalWords = rawStt.words;
+          log.info({ wordCount: segBOriginalWords.length }, 'Transcribed raw clip for Segment B conversation subtitles');
+        } else {
+          log.warn('Segment B raw transcription returned no words');
+        }
+      } catch (bErr) {
+        log.warn({ bErr }, 'Segment B raw transcription failed; replay will have no original subtitles');
       }
     }
 
@@ -329,7 +362,7 @@ export class CommentatorPipeline {
       takeawayWords: takeawayAlignedWords.length > 0 ? takeawayAlignedWords : undefined,
       customThumbnailPath: req.customThumbnailPath,
       brandingLogoPath: req.brandingLogoPath,
-      originalTranscriptWords: req.originalTranscriptWords,
+      originalTranscriptWords: segBOriginalWords,
     });
 
     log.info({ outputPath }, 'Successfully generated commentary video');
@@ -356,11 +389,18 @@ export class CommentatorPipeline {
         await this.compositor.composite({ inputVideoPath: outputPath, avatar: req.avatar, segments });
         log.info('Avatar overlay composited successfully');
       } catch (compErr) {
-        log.warn({ compErr }, 'Avatar compositing failed; keeping original commentary video');
+        avatarErrorMsg = compErr instanceof Error ? compErr.message : String(compErr);
+        log.error({ compErr }, 'Avatar compositing failed; keeping original commentary video');
       }
     }
 
-    this._emitProgress(100, 'done', 'Commentary video generation complete!');
+    this._emitProgress(
+      100,
+      'done',
+      avatarErrorMsg
+        ? `Selesai — namun avatar gagal dibuat (${avatarErrorMsg}). Video tetap dibuat tanpa avatar.`
+        : 'Commentary video generation complete!',
+    );
 
     return {
       outputPath,
