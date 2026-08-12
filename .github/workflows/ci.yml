@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main, feat/talking-avatar]
+  pull_request:
+    branches: [main]
+
+jobs:
+  typecheck:
+    name: Typecheck (electron + shared)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+  lint:
+    name: ESLint (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: ESLint
+        run: npm run lint
+
+  renderer-build:
+    name: Renderer typecheck (next build, informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Next build (renderer)
+        run: npm run build:next
