@@ -118,6 +118,19 @@ HARD CONSTRAINTS:
 4. SHORT SENTENCES: Max 12 words per sentence. Punchy fragments are encouraged.
 
 ═══════════════════════════════════════
+WRITE LIKE A REAL HUMAN — NOT AI (MANDATORY):
+═══════════════════════════════════════
+The #1 goal is that this NEVER sounds AI-generated. Write how people actually TALK, not how AI writes.
+- Read every line in your head. If it sounds like an essay or a documentary narrator, REWRITE it.
+- ALWAYS use contractions: "he's", "that's", "gonna", "didn't", "you're", "there's". Never stiff full forms.
+- Speak in FIRST PERSON with a real opinion and reaction words: "I", "honestly", "look", "okay so", "not gonna lie", "wait".
+- Vary sentence length ON PURPOSE: slam a 2-word punch next to a longer line. One casual sentence fragment is good — it feels spontaneous and human.
+- It's okay to be slightly imperfect, casual, and opinionated. Real reactions are not grammatically perfect.
+- NEVER use these AI-tell words/phrases: "delve", "moreover", "furthermore", "in conclusion", "ultimately", "testament", "vibrant", "bustling", "whimsical", "navigate the complexities", "little did they know", "in a world where", "one thing is certain".
+- NO rigid 1-2-3 list phrasing and NO perfectly parallel sentences back-to-back — that instantly reads as AI.
+- Avoid over-punctuation. Write it the way you'd actually say it out loud to a friend.
+
+═══════════════════════════════════════
 HOOK (hookText) — FIRST 1-3 SECONDS:
 ═══════════════════════════════════════
 Must stop the scroll immediately by introducing an intriguing hook, hidden detail, or hilarious angle.
@@ -257,7 +270,7 @@ Return ONLY a JSON object (no markdown, no text outside JSON):
         ],
         generationConfig: {
           responseMimeType: 'application/json',
-          temperature: 0.7,
+          temperature: 0.9,
         },
       };
 
@@ -336,9 +349,9 @@ Return ONLY a JSON object (no markdown, no text outside JSON):
       if (fenceMatch) cleaned = fenceMatch[1].trim();
 
       const parsed = JSON.parse(cleaned);
-      const hookText = parsed.hookText || 'Watch this closely!';
+      const hookText = parsed.hookText || 'Okay, you need to see this part.';
       const scriptText = parsed.scriptText || parsed.segments?.map((s: any) => s.text).join(' ') || hookText;
-      const takeawayText = parsed.takeawayText || 'Remember, every challenge in life is a opportunity to grow!';
+      const takeawayText = parsed.takeawayText || "Yeah... I still can't believe that actually happened.";
 
       let segments: CommentatorScriptSegment[] = parsed.segments || [];
       if (segments.length === 0) {
@@ -360,7 +373,7 @@ Return ONLY a JSON object (no markdown, no text outside JSON):
     } catch (err) {
       log.warn({ err, raw }, 'Failed to parse JSON script from Gemini response, using raw text fallback');
       return {
-        hookText: 'Check this out!',
+        hookText: 'Okay, watch this.',
         scriptText: raw,
         targetWpm: 155,
         estimatedDurationMs: durationMs,
