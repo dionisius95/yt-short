@@ -16,7 +16,7 @@ import { Transcriber } from './Transcriber';
 import { AvatarGenerator } from './AvatarGenerator';
 import { AvatarCompositor } from './AvatarCompositor';
 import { createLogger } from '../utils/logger';
-import type { CommentatorRequest, CommentatorResult, TranscriptWord } from '../../shared/types';
+import type { CommentatorRequest, CommentatorResult, TranscriptWord, WhisperModelSize } from '../../shared/types';
 import type { AvatarClips } from '../../shared/avatarTypes';
 
 const log = createLogger('CommentatorPipeline');
@@ -312,7 +312,7 @@ export class CommentatorPipeline {
           'segmentb-raw',
           videoPath,
           'en',
-          apiKeys.whisperModelSize || 'small',
+          (apiKeys.whisperModelSize || 'small') as WhisperModelSize,
           undefined,
           undefined,
           undefined,
