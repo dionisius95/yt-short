@@ -1,48 +1,140 @@
 #!/usr/bin/env bash
 # Setup engine avatar untuk Google Colab T4.
-# Jalankan sekali per sesi Colab SEBELUM menjalankan avatar_server.py.
-set -e
+# Jalankan sekali per sesi Colab SEBELUM menjalankan server.
+# Idempotent: aman dijalankan ulang (git pull -> re-patch SadTalker di disk).
+# CATATAN: sengaja TIDAK menjalankan requirements.txt SadTalker, karena pin lama
+# (numpy==1.23, torch lama) akan men-downgrade env & merusak VoxCPM2.
 
 WORK=/content
 ASSETS=$WORK/assets
 mkdir -p "$ASSETS"
 
 echo "==> System deps"
-apt-get -qq update && apt-get -qq install -y ffmpeg git-lfs >/dev/null
+apt-get -qq update >/dev/null 2>&1 || true
+apt-get -qq install -y ffmpeg git-lfs >/dev/null 2>&1 || true
 
-echo "==> Python deps"
-pip -q install flask flask-cloudflared imageio-ffmpeg gfpgan yacs face-alignment safetensors
+echo "==> Python deps (tanpa pin yang bisa merusak numpy/torch VoxCPM)"
+pip -q install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors \
+    face-alignment kornia pydub librosa numba resampy gfpgan basicsr scikit-image >/dev/null 2>&1 || \
+  pip -q install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors face-alignment kornia pydub librosa numba resampy gfpgan basicsr scikit-image || true
 
 # --------- SadTalker (mode talk: A & C) ---------
 if [ ! -d "$WORK/SadTalker" ]; then
   echo "==> Clone SadTalker"
   git clone -q https://github.com/OpenTalker/SadTalker "$WORK/SadTalker"
-  pip -q install -r "$WORK/SadTalker/requirements.txt" || true
-  (cd "$WORK/SadTalker" && bash scripts/download_models.sh)
 fi
+
+# Unduh checkpoint (idempotent; skip kalau sudah ada).
+if [ ! -d "$WORK/SadTalker/checkpoints" ] || [ -z "$(ls -A "$WORK/SadTalker/checkpoints" 2>/dev/null)" ]; then
+  echo "==> Download model SadTalker"
+  ( cd "$WORK/SadTalker" && bash scripts/download_models.sh ) || echo "WARN: download_models.sh gagal sebagian"
+fi
+
+echo "==> Tulis shim kompatibilitas SadTalker (numpy2 / torchvision0.17+ / torch2.6)"
+cat > "$WORK/SadTalker/pippit_compat.py" <<'PYEOF'
+# Auto-generated shim: bikin SadTalker (2023) jalan di stack modern Colab.
+# Diimpor paling atas oleh inference.py (dan self-test) sebelum modul lain.
+import sys
+
+# 1) numpy alias lama (np.float / np.int / ... dihapus di numpy>=1.24 & 2.x)
+try:
+    import numpy as _np
+    for _n, _t in {"float": float, "int": int, "bool": bool, "object": object,
+                   "str": str, "complex": complex, "long": int, "unicode": str}.items():
+        if not hasattr(_np, _n):
+            setattr(_np, _n, _t)
+except Exception as _e:
+    print("[pippit_compat] numpy shim warn:", _e, flush=True)
+
+# 2) torchvision.transforms.functional_tensor (dihapus di torchvision>=0.17;
+#    dipakai basicsr/gfpgan). Alias-kan ke modul functional yang baru.
+try:
+    import torchvision.transforms.functional as _tvf
+    sys.modules.setdefault("torchvision.transforms.functional_tensor", _tvf)
+except Exception as _e:
+    print("[pippit_compat] torchvision shim warn:", _e, flush=True)
+
+# 3) torch.load default weights_only=True (torch>=2.6) -> paksa False supaya
+#    checkpoint SadTalker (berisi objek ter-pickle) tetap bisa dimuat.
+try:
+    import torch as _torch
+    if not getattr(_torch.load, "_pippit_patched", False):
+        _orig_load = _torch.load
+        def _patched_load(*a, **k):
+            k.setdefault("weights_only", False)
+            return _orig_load(*a, **k)
+        _patched_load._pippit_patched = True
+        _torch.load = _patched_load
+except Exception as _e:
+    print("[pippit_compat] torch.load shim warn:", _e, flush=True)
+PYEOF
+
+# Sisipkan `import pippit_compat` paling atas inference.py (idempotent).
+python3 - <<'PYEOF'
+import io
+p = "/content/SadTalker/inference.py"
+try:
+    src = io.open(p, encoding="utf-8").read()
+except FileNotFoundError:
+    print("[patch] WARN: inference.py tidak ditemukan"); raise SystemExit(0)
+if "pippit_compat" not in src:
+    lines = src.splitlines(keepends=True)
+    ins = 0
+    for i, ln in enumerate(lines[:2]):
+        if ln.startswith("#!") or "coding" in ln:
+            ins = i + 1
+    lines.insert(ins, "import pippit_compat  # PIPPIT: modern-stack shims\n")
+    io.open(p, "w", encoding="utf-8").write("".join(lines))
+    print("[patch] inference.py: pippit_compat disisipkan")
+else:
+    print("[patch] inference.py: pippit_compat sudah ada")
+PYEOF
+
+# Patch sumber alias numpy lama yg dipakai saat definisi modul (word-boundary aman,
+# tidak mengubah np.float32 / np.int64 dsb).
+for kw in float int bool object str complex; do
+  grep -rlZ --include='*.py' -E "np\.${kw}\b" "$WORK/SadTalker/src" 2>/dev/null \
+    | xargs -0 -r sed -i -E "s/\bnp\.${kw}\b/${kw}/g" 2>/dev/null || true
+done
 
 # --------- LivePortrait (mode idle: B) ---------
 if [ ! -d "$WORK/LivePortrait" ]; then
   echo "==> Clone LivePortrait"
   git clone -q https://github.com/KwaiVGI/LivePortrait "$WORK/LivePortrait"
-  pip -q install -r "$WORK/LivePortrait/requirements.txt" || true
-  # checkpoint via huggingface
-  pip -q install "huggingface_hub[cli]"
-  huggingface-cli download KwaiVGI/LivePortrait --local-dir "$WORK/LivePortrait/pretrained_weights" --exclude "*.git*" || true
+  pip -q install -r "$WORK/LivePortrait/requirements.txt" >/dev/null 2>&1 || true
+  pip -q install "huggingface_hub[cli]" >/dev/null 2>&1 || true
+  huggingface-cli download KwaiVGI/LivePortrait --local-dir "$WORK/LivePortrait/pretrained_weights" --exclude "*.git*" >/dev/null 2>&1 || true
 fi
 
 # --------- Idle driving video untuk Segment B ---------
-# Pakai driving sample bawaan LivePortrait (subtle head + blink), potong 3 dtk.
 if [ ! -f "$ASSETS/idle_driving.mp4" ]; then
   echo "==> Siapkan idle driving video"
-  SRC=$(find "$WORK/LivePortrait" -name '*.mp4' -path '*driving*' | head -n1 || true)
+  SRC=$(find "$WORK/LivePortrait" -name '*.mp4' -path '*driving*' 2>/dev/null | head -n1)
   if [ -n "$SRC" ]; then
-    ffmpeg -y -i "$SRC" -t 3 -vf fps=25 -an "$ASSETS/idle_driving.mp4"
+    ffmpeg -y -i "$SRC" -t 3 -vf fps=25 -an "$ASSETS/idle_driving.mp4" >/dev/null 2>&1 || true
   else
-    echo "WARN: tidak menemукan driving sample; idle akan fallback ke SadTalker still."
+    echo "WARN: tidak menemukan driving sample; idle akan fallback ke SadTalker still."
   fi
 fi
 
+# --------- SELF-TEST: apakah SadTalker benar-benar bisa di-import? ---------
+echo "==> Self-test import SadTalker di stack modern ..."
+python3 - <<'PYEOF'
+import sys, traceback
+sys.path.insert(0, "/content/SadTalker")
+try:
+    import pippit_compat  # aktifkan shim modern-stack
+    from src.utils.preprocess import CropAndExtract
+    from src.test_audio2coeff import Audio2Coeff
+    from src.facerender.animate import AnimateFromCoeff
+    from src.generate_batch import get_data
+    print("SADTALKER_IMPORT_OK")
+except Exception:
+    print("SADTALKER_IMPORT_FAILED")
+    traceback.print_exc()
+PYEOF
+
+echo
 echo "==> Selesai. Set env lalu jalankan server:"
 echo "    export SADTALKER_DIR=$WORK/SadTalker"
 echo "    export LIVEPORTRAIT_DIR=$WORK/LivePortrait"
