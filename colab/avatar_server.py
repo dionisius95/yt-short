@@ -85,6 +85,17 @@ def _log(*a):
     print('[avatar]', *a, flush=True)
 
 
+def _free_cuda():
+    """Lepas VRAM cache (mis. cache VoxCPM yang menganggur) sebelum render.
+    Bobot model yang resident tetap dipertahankan; hanya blok cache dilepas."""
+    try:
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
 def _prep_image(raw: bytes, dst: Path) -> Path:
     """Decode, EXIF-normalize, downscale to MAX_SIDE, save as PNG."""
     tmp = dst.with_suffix('.in')
@@ -107,18 +118,24 @@ def _prep_image(raw: bytes, dst: Path) -> Path:
     return dst
 
 
-def _run(cmd, cwd=None, timeout=600):
+def _run(cmd, cwd=None, timeout=600, env=None):
     _log('run:', ' '.join(str(c) for c in cmd))
+    run_env = dict(os.environ)
+    # Kurangi fragmentasi VRAM saat VoxCPM + SadTalker berbagi satu T4.
+    run_env.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+    if env:
+        run_env.update(env)
     proc = subprocess.run(
         [str(c) for c in cmd],
         cwd=str(cwd) if cwd else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         timeout=timeout,
+        env=run_env,
     )
     out = proc.stdout.decode('utf-8', 'ignore') if proc.stdout else ''
     if proc.returncode != 0:
-        raise RuntimeError(f'command failed ({proc.returncode}):\n{out[-4000:]}')
+        raise RuntimeError('command failed (' + str(proc.returncode) + '): ' + out[-4000:])
     return out
 
 
@@ -145,21 +162,44 @@ def _make_silent_wav(dst: Path, seconds: float, fps: int):
     ])
 
 
+def _is_oom(msg: str) -> bool:
+    m = (msg or '').lower()
+    return 'out of memory' in m or 'outofmemoryerror' in m or 'cuda oom' in m
+
+
 def _render_sadtalker(image: Path, audio: Path, out_dir: Path, fps: int) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        sys.executable, 'inference.py',
-        '--source_image', str(image),
-        '--driven_audio', str(audio),
-        '--result_dir', str(out_dir),
-        '--still', '--preprocess', 'full',
-        '--size', str(min(512, MAX_SIDE)),
-    ]
-    _run(cmd, cwd=SADTALKER_DIR, timeout=900)
-    vid = _newest_mp4(out_dir)
-    if not vid:
-        raise RuntimeError('SadTalker produced no mp4')
-    return vid
+    # Lepas VRAM cache dulu agar subprocess SadTalker dapat ruang di T4.
+    _free_cuda()
+    # Coba size utama; kalau kena CUDA OOM (VRAM dibagi VoxCPM), turun ke 256.
+    primary = min(512, MAX_SIDE)
+    sizes = [primary] + ([256] if primary != 256 else [])
+    last_err = None
+    for idx, size in enumerate(sizes):
+        cmd = [
+            sys.executable, 'inference.py',
+            '--source_image', str(image),
+            '--driven_audio', str(audio),
+            '--result_dir', str(out_dir),
+            '--still', '--preprocess', 'full',
+            '--size', str(size),
+        ]
+        try:
+            _run(cmd, cwd=SADTALKER_DIR, timeout=900)
+            vid = _newest_mp4(out_dir)
+            if not vid:
+                raise RuntimeError('SadTalker produced no mp4')
+            return vid
+        except RuntimeError as e:
+            last_err = e
+            if _is_oom(str(e)) and idx < len(sizes) - 1:
+                _log('CUDA OOM di size ' + str(size) + '; bebaskan VRAM & coba size ' + str(sizes[idx + 1]) + ' ...')
+                _free_cuda()
+                continue
+            raise
+    if last_err:
+        raise last_err
+    raise RuntimeError('SadTalker gagal render')
 
 
 def _render_liveportrait_idle(image: Path, out_dir: Path, seconds: float, fps: int) -> Path:
