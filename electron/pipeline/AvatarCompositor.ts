@@ -59,15 +59,23 @@ export class AvatarCompositor {
 		segments.forEach((seg, i) => {
 			const idx = i + 1; // ffmpeg input index (0 is the main video)
 			const av = `av${i}`;
+			// HOLD LAST FRAME: an avatar clip is often a touch shorter than its
+			// segment window (talk clip ~= TTS duration, but the segment gets a
+			// little padding + xfade overlap). Without padding, the overlay simply
+			// vanishes as soon as the clip ends, which looks like an amateur cut.
+			// tpad clones the final frame so the avatar stays on-screen through the
+			// whole segment; the `enable` gate below still removes it exactly at the
+			// segment boundary. The clone is bounded by the main video length.
+			const hold = 'tpad=stop_mode=clone:stop_duration=3600,';
 			if (avatar.shape === 'circle') {
 				filters.push(
-					`[${idx}:v]scale=${avatarW}:${avatarW}:force_original_aspect_ratio=increase,` +
+					`[${idx}:v]${hold}scale=${avatarW}:${avatarW}:force_original_aspect_ratio=increase,` +
 						`crop=${avatarW}:${avatarW},format=rgba,` +
 						`geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':` +
 						`a='if(gt((X-${r})*(X-${r})+(Y-${r})*(Y-${r})\\,${rr})\\,0\\,255)'[${av}]`,
 				);
 			} else {
-				filters.push(`[${idx}:v]scale=${avatarW}:-1[${av}]`);
+				filters.push(`[${idx}:v]${hold}scale=${avatarW}:-1[${av}]`);
 			}
 			const pos = this.position(avatar);
 			const out = i === segments.length - 1 ? '[vout]' : `[v${i}]`;
