@@ -27,10 +27,11 @@ const AVATAR_TIMEOUT_MS = 12 * 60 * 1000;
 const POLL_INTERVAL_MS = 4000;
 // Cap each individual HTTP call so it never sits open near the tunnel's ~100s limit.
 const REQUEST_TIMEOUT_MS = 90 * 1000;
-// Quick tunnels are flaky: a single dropped connection ('fetch failed') must not
-// abort a multi-minute render whose background job already succeeded. Retry the
-// submit a few times, and treat transient poll failures as 'still pending'.
-const SUBMIT_RETRIES = 4;
+// Quick tunnels are flaky: a single dropped connection ('fetch failed') or a
+// transient gateway error (HTTP 502/503/504 HTML page) must not abort a
+// multi-minute render whose background job is still running. Retry submit a few
+// times, and treat transient poll failures as 'still pending'.
+const SUBMIT_RETRIES = 5;
 const SUBMIT_RETRY_DELAY_MS = 3000;
 
 type SubmitResult = { mp4?: Buffer; jobId?: string; raw?: string };
@@ -43,8 +44,9 @@ type PollResult = { pending?: boolean; mp4?: Buffer; error?: string };
  *
  * Transport is async: POST /avatar enqueues a render and returns { job_id };
  * GET /avatar/result/<job_id> returns 202 while working, then the mp4. This
- * keeps every request short so Cloudflare quick tunnels never 524 mid-render,
- * and transient connection drops are retried instead of being fatal.
+ * keeps every request short so Cloudflare quick tunnels never 524 mid-render.
+ * Transient connection drops and gateway (502/503/504) hiccups are retried
+ * instead of being treated as failures.
  */
 export class AvatarGenerator {
 	async generate(params: AvatarGenerateParams): Promise<string> {
@@ -86,7 +88,8 @@ export class AvatarGenerator {
 		}
 
 		// 2) Poll for the finished mp4 until done / error / deadline. Transient
-		//    tunnel drops are swallowed by pollResult and retried on the next tick.
+		//    tunnel drops and gateway hiccups are swallowed by pollResult and
+		//    retried on the next tick; the background job keeps running.
 		const resultUrl = `${base}/avatar/result/${submit.jobId}`;
 		while (Date.now() < deadline) {
 			await AvatarGenerator.sleep(POLL_INTERVAL_MS);
@@ -137,13 +140,20 @@ export class AvatarGenerator {
 					);
 				}
 
-				// Explicit HTTP error from the server is not transient: surface it.
-				throw new Error(await AvatarGenerator.httpError('avatar endpoint', res));
+				// Non-OK: a tunnel gateway hiccup is transient (retry); our own JSON
+				// error means the request was truly rejected (surface it).
+				const text = await res.text().catch(() => '');
+				const msg = AvatarGenerator.fmtHttp('avatar endpoint', res.status, text);
+				if (AvatarGenerator.isGatewayError(res.status, text)) {
+					lastErr = new Error(msg);
+				} else {
+					throw new Error(msg);
+				}
 			} catch (e) {
 				lastErr = e;
-				if (!AvatarGenerator.isTransient(e) || attempt === SUBMIT_RETRIES - 1) {
-					throw e;
-				}
+				if (!AvatarGenerator.isTransient(e)) throw e;
+			}
+			if (attempt < SUBMIT_RETRIES - 1) {
 				await AvatarGenerator.sleep(SUBMIT_RETRY_DELAY_MS);
 			}
 		}
@@ -161,8 +171,12 @@ export class AvatarGenerator {
 				// the job is still done, so retry on the next tick.
 				return { pending: true };
 			}
-			// Explicit server error (job failed): stop and report it.
-			return { error: await AvatarGenerator.httpError('avatar result', res) };
+			// Tunnel gateway hiccup (HTML 502/503/504): the render keeps running and
+			// the result stays available, so keep polling instead of failing.
+			const text = await res.text().catch(() => '');
+			if (AvatarGenerator.isGatewayError(res.status, text)) return { pending: true };
+			// Our server's own JSON error (e.g. render/OOM failure): stop and report.
+			return { error: AvatarGenerator.fmtHttp('avatar result', res.status, text) };
 		} catch (e) {
 			// Transient tunnel/connection drop during a long render: keep polling.
 			if (AvatarGenerator.isTransient(e)) return { pending: true };
@@ -205,9 +219,24 @@ export class AvatarGenerator {
 			msg.includes('socket') ||
 			msg.includes('network') ||
 			msg.includes('terminated') ||
-			msg.includes('und_err') ||
-			msg.includes('other side closed')
+			msg.includes('other side closed') ||
+			msg.includes('und_err')
 		);
+	}
+
+	/**
+	 * A tunnel/CDN gateway error (not our API). Cloudflare returns 502/503/504
+	 * (and 520-527) with an HTML error page when it briefly can't reach the
+	 * Colab origin. Our own server always replies with JSON, so an HTML body is
+	 * a reliable tell that the error came from the tunnel, not the render.
+	 */
+	private static isGatewayError(status: number, body: string): boolean {
+		if (status === 502 || status === 503 || status === 504 || status === 429) {
+			return true;
+		}
+		if (status >= 520 && status <= 527) return true;
+		const b = (body || '').trimStart().toLowerCase();
+		return b.startsWith('<!doctype') || b.startsWith('<html');
 	}
 
 	/**
@@ -239,16 +268,15 @@ export class AvatarGenerator {
 		}
 	}
 
-	private static async httpError(label: string, res: any): Promise<string> {
-		const text = await res.text().catch(() => '');
-		const msg = `${label} HTTP ${res.status}`;
+	private static fmtHttp(label: string, status: number, text: string): string {
+		const msg = `${label} HTTP ${status}`;
 		try {
 			const j = JSON.parse(text);
 			if (j?.error) return `${msg}: ${j.error}`;
 		} catch {
-			// body was not JSON
+			// body was not JSON (e.g. HTML gateway page)
 		}
-		return text ? `${msg}: ${text.slice(0, 300)}` : msg;
+		return text ? `${msg}: ${text.slice(0, 200)}` : msg;
 	}
 
 	private static sleep(ms: number): Promise<void> {
