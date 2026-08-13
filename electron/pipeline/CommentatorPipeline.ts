@@ -373,6 +373,26 @@ export class CommentatorPipeline {
     if (avatarClips && req.avatar) {
       try {
         this._emitProgress(96, 'avatar', 'Compositing talking avatar overlay...');
+        // Re-derive avatar segment offsets to match Processor's REAL 3-seg
+        // timeline. Processor pads Segment A video to hookAudio + 650ms and
+        // Segment C to takeawayAudio + 300ms, then joins the three segments
+        // with an xfade of tDur that pulls every later segment earlier. The
+        // raw TTS/clip durations set in step 5d made Segment C start ~0.5-1s
+        // too early and out of sync with its dubbed audio/video, so recompute
+        // the offsets here to mirror the Processor timeline exactly.
+        {
+          const hasSegC = !!avatarClips.segmentC;
+          const durA = Math.max(2000, Math.ceil(actualTtsDurMs || ttsDurationMs) + 650) / 1000;
+          const durB = durationMs / 1000;
+          const durC = Math.max(3000, Math.ceil(takeawayDurationMs || 0) + 300) / 1000;
+          const useXfade = (req.transitionEffect || 'fade') !== 'none';
+          const tDur = useXfade
+            ? Math.min(0.35, ...(hasSegC ? [durA, durB, durC] : [durA, durB]).map((d) => d * 0.25))
+            : 0;
+          avatarSegASec = durA - tDur / 2;
+          avatarSegBSec = durB - tDur;
+          avatarSegCSec = durC - tDur / 2;
+        }
         const segments: Array<{ clipPath: string; startSec: number; endSec: number }> = [];
         let cursor = 0;
         if (avatarClips.segmentA) {
@@ -387,7 +407,7 @@ export class CommentatorPipeline {
           segments.push({ clipPath: avatarClips.segmentC, startSec: cursor, endSec: cursor + avatarSegCSec });
         }
         await this.compositor.composite({ inputVideoPath: outputPath, avatar: req.avatar, segments });
-        log.info('Avatar overlay composited successfully');
+        log.info({ avatarSegASec, avatarSegBSec, avatarSegCSec }, 'Avatar overlay composited successfully');
       } catch (compErr) {
         avatarErrorMsg = compErr instanceof Error ? compErr.message : String(compErr);
         log.error({ compErr }, 'Avatar compositing failed; keeping original commentary video');
