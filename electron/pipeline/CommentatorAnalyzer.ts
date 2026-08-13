@@ -267,8 +267,16 @@ Return ONLY a JSON object (no markdown, no text outside JSON):
     const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash-002', 'gemini-1.5-flash-001', 'gemini-1.5-flash'];
     let lastError: Error | null = null;
 
+    // IMPORTANT: assemble the endpoint from parts. Do NOT inline the full URL as a
+    // single literal string — doing so previously caused stray "{{ }}" braces to be
+    // injected into the source, producing `TypeError: Invalid URL` at runtime.
+    const scheme = 'https';
+    const apiHost = 'us-central1-aiplatform.googleapis.com';
+    const location = 'us-central1';
+    const apiBase = `${scheme}://${apiHost}/v1/projects/${projectId}/locations/${location}/publishers/google/models`;
+
     for (const model of models) {
-      const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/${model}:generateContent`;
+      const url = `${apiBase}/${model}:generateContent`;
 
       const payload = {
         contents: [
