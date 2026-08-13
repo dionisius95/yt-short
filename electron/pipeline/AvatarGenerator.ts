@@ -27,6 +27,11 @@ const AVATAR_TIMEOUT_MS = 12 * 60 * 1000;
 const POLL_INTERVAL_MS = 4000;
 // Cap each individual HTTP call so it never sits open near the tunnel's ~100s limit.
 const REQUEST_TIMEOUT_MS = 90 * 1000;
+// Quick tunnels are flaky: a single dropped connection ('fetch failed') must not
+// abort a multi-minute render whose background job already succeeded. Retry the
+// submit a few times, and treat transient poll failures as 'still pending'.
+const SUBMIT_RETRIES = 4;
+const SUBMIT_RETRY_DELAY_MS = 3000;
 
 type SubmitResult = { mp4?: Buffer; jobId?: string; raw?: string };
 type PollResult = { pending?: boolean; mp4?: Buffer; error?: string };
@@ -38,7 +43,8 @@ type PollResult = { pending?: boolean; mp4?: Buffer; error?: string };
  *
  * Transport is async: POST /avatar enqueues a render and returns { job_id };
  * GET /avatar/result/<job_id> returns 202 while working, then the mp4. This
- * keeps every request short so Cloudflare quick tunnels never 524 mid-render.
+ * keeps every request short so Cloudflare quick tunnels never 524 mid-render,
+ * and transient connection drops are retried instead of being fatal.
  */
 export class AvatarGenerator {
 	async generate(params: AvatarGenerateParams): Promise<string> {
@@ -79,7 +85,8 @@ export class AvatarGenerator {
 			);
 		}
 
-		// 2) Poll for the finished mp4 until done / error / deadline.
+		// 2) Poll for the finished mp4 until done / error / deadline. Transient
+		//    tunnel drops are swallowed by pollResult and retried on the next tick.
 		const resultUrl = `${base}/avatar/result/${submit.jobId}`;
 		while (Date.now() < deadline) {
 			await AvatarGenerator.sleep(POLL_INTERVAL_MS);
@@ -99,45 +106,68 @@ export class AvatarGenerator {
 		body: string,
 		deadline: number,
 	): Promise<SubmitResult> {
-		const res = await this.fetchWithTimeout(
-			endpoint,
-			{
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body,
-			},
-			deadline,
-		);
+		let lastErr: unknown;
+		for (let attempt = 0; attempt < SUBMIT_RETRIES; attempt++) {
+			if (Date.now() >= deadline) break;
+			try {
+				const res = await this.fetchWithTimeout(
+					endpoint,
+					{
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body,
+					},
+					deadline,
+				);
 
-		// New async server: 202 + { job_id }.
-		if (res.status === 202) {
-			const text = await res.text().catch(() => '');
-			return { jobId: AvatarGenerator.parseJobId(text), raw: text };
+				// New async server: 202 + { job_id }.
+				if (res.status === 202) {
+					const text = await res.text().catch(() => '');
+					return { jobId: AvatarGenerator.parseJobId(text), raw: text };
+				}
+
+				if (res.ok) {
+					const buf = Buffer.from(await res.arrayBuffer());
+					if (AvatarGenerator.isMp4(buf)) return { mp4: buf };
+					const text = buf.toString('utf-8');
+					const jobId = AvatarGenerator.parseJobId(text);
+					if (jobId) return { jobId, raw: text };
+					throw new Error(
+						`avatar submit returned unexpected body: ${text.slice(0, 300)}`,
+					);
+				}
+
+				// Explicit HTTP error from the server is not transient: surface it.
+				throw new Error(await AvatarGenerator.httpError('avatar endpoint', res));
+			} catch (e) {
+				lastErr = e;
+				if (!AvatarGenerator.isTransient(e) || attempt === SUBMIT_RETRIES - 1) {
+					throw e;
+				}
+				await AvatarGenerator.sleep(SUBMIT_RETRY_DELAY_MS);
+			}
 		}
-
-		if (res.ok) {
-			const buf = Buffer.from(await res.arrayBuffer());
-			if (AvatarGenerator.isMp4(buf)) return { mp4: buf };
-			const text = buf.toString('utf-8');
-			const jobId = AvatarGenerator.parseJobId(text);
-			if (jobId) return { jobId, raw: text };
-			throw new Error(
-				`avatar submit returned unexpected body: ${text.slice(0, 300)}`,
-			);
-		}
-
-		throw new Error(await AvatarGenerator.httpError('avatar endpoint', res));
+		throw lastErr instanceof Error ? lastErr : new Error('avatar submit failed');
 	}
 
 	private async pollResult(url: string, deadline: number): Promise<PollResult> {
-		const res = await this.fetchWithTimeout(url, { method: 'GET' }, deadline);
-		if (res.status === 202) return { pending: true };
-		if (res.ok) {
-			const buf = Buffer.from(await res.arrayBuffer());
-			if (AvatarGenerator.isMp4(buf)) return { mp4: buf };
-			return { error: 'avatar result was not a valid mp4' };
+		try {
+			const res = await this.fetchWithTimeout(url, { method: 'GET' }, deadline);
+			if (res.status === 202) return { pending: true };
+			if (res.ok) {
+				const buf = Buffer.from(await res.arrayBuffer());
+				if (AvatarGenerator.isMp4(buf)) return { mp4: buf };
+				// A 200 that is not a full mp4 means the body dropped mid-transfer;
+				// the job is still done, so retry on the next tick.
+				return { pending: true };
+			}
+			// Explicit server error (job failed): stop and report it.
+			return { error: await AvatarGenerator.httpError('avatar result', res) };
+		} catch (e) {
+			// Transient tunnel/connection drop during a long render: keep polling.
+			if (AvatarGenerator.isTransient(e)) return { pending: true };
+			return { error: e instanceof Error ? e.message : String(e) };
 		}
-		return { error: await AvatarGenerator.httpError('avatar result', res) };
 	}
 
 	private async fetchWithTimeout(
@@ -154,6 +184,30 @@ export class AvatarGenerator {
 		} finally {
 			clearTimeout(timer);
 		}
+	}
+
+	/**
+	 * Classify an error as a transient connection failure worth retrying
+	 * (tunnel dropped a socket, reset, DNS blip, per-request abort) vs a real
+	 * server error that should stop the flow.
+	 */
+	private static isTransient(e: unknown): boolean {
+		const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
+		return (
+			msg.includes('fetch failed') ||
+			msg.includes('aborted') ||
+			msg.includes('timeout') ||
+			msg.includes('timed out') ||
+			msg.includes('econnreset') ||
+			msg.includes('econnrefused') ||
+			msg.includes('enotfound') ||
+			msg.includes('eai_again') ||
+			msg.includes('socket') ||
+			msg.includes('network') ||
+			msg.includes('terminated') ||
+			msg.includes('und_err') ||
+			msg.includes('other side closed')
+		);
 	}
 
 	/**
