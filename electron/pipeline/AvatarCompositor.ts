@@ -104,7 +104,62 @@ export class AvatarCompositor {
 		];
 
 		await this.run(ffArgs);
-		fs.renameSync(tmpOut, inputVideoPath);
+		await this.finalizeReplace(tmpOut, inputVideoPath);
+	}
+
+	/**
+	 * Replace the original output with the freshly composited temp file.
+	 *
+	 * On Windows the just-rendered output is frequently still locked for a
+	 * moment (antivirus scanning the new mp4, a lingering ffmpeg handle, or an
+	 * open preview player), so a direct rename throws EPERM/EBUSY and the avatar
+	 * overlay would be dropped even though every segment rendered fine. Retry
+	 * with backoff, then fall back to copying over the destination once the
+	 * lock clears.
+	 */
+	private async finalizeReplace(tmpOut: string, target: string): Promise<void> {
+		const isLockErr = (e: any) =>
+			!!e &&
+			(e.code === 'EPERM' ||
+				e.code === 'EBUSY' ||
+				e.code === 'EACCES' ||
+				e.code === 'ENOTEMPTY');
+		const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+		let lastErr: unknown;
+
+		// 1) Try an atomic rename, retrying while the destination is locked.
+		for (let attempt = 0; attempt < 15; attempt++) {
+			try {
+				fs.renameSync(tmpOut, target);
+				return;
+			} catch (e) {
+				lastErr = e;
+				if (!isLockErr(e)) throw e;
+				await sleep(600);
+			}
+		}
+
+		// 2) Rename kept failing (destination still locked): copy over it instead,
+		//    which succeeds as soon as the reader releases its handle.
+		for (let attempt = 0; attempt < 10; attempt++) {
+			try {
+				fs.copyFileSync(tmpOut, target);
+				try {
+					fs.unlinkSync(tmpOut);
+				} catch {
+					/* leave the temp file for manual cleanup */
+				}
+				return;
+			} catch (e) {
+				lastErr = e;
+				if (!isLockErr(e)) throw e;
+				await sleep(600);
+			}
+		}
+
+		throw lastErr instanceof Error
+			? lastErr
+			: new Error('failed to replace output with avatar composite (file locked)');
 	}
 
 	/** Overlay position expressions using FFmpeg main (W/H) and overlay (w/h) vars. */
