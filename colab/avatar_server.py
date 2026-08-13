@@ -2,31 +2,32 @@
 """
 Talking Avatar server for Google Colab (T4-friendly).
 
-Exposes ONE new route `/avatar` on the SAME host you already use for the VoxCPM/
-XTTS voice clone. The desktop app posts the user's photo + cloned-voice audio and
+Exposes avatar routes on the SAME Flask host you already use for the VoxCPM/
+XTTS voice clone. The desktop app posts the user photo + cloned-voice audio and
 gets back an mp4.
 
-Engines (hybrid, natural, not "AI-looking"):
-  - mode == 'talk'  -> SadTalker (lip-sync + head motion + blinks) for Segment A/C
-  - mode == 'idle'  -> LivePortrait retargeting of a subtle driving clip for
-                       Segment B (silent but blinking/expressive). Falls back to
-                       a still SadTalker render if LivePortrait/idle driving is
-                       unavailable.
+Engines (hybrid, natural):
+  - mode == talk  -> SadTalker (lip-sync + head motion + blinks) for Segment A/C
+  - mode == idle  -> LivePortrait retargeting of a subtle driving clip for
+                     Segment B (silent but blinking/expressive). Falls back to a
+                     still SadTalker render if LivePortrait is unavailable.
 
-Contract
---------
+Async contract (avoids Cloudflare 524 timeouts)
+-----------------------------------------------
+Rendering can take several minutes, but Cloudflare quick tunnels drop any single
+request that runs past ~100 seconds (HTTP 524). So the render is a background
+job and the client polls for the result:
+
 POST /avatar   (JSON)
-  {
-    "image_b64": "<base64 jpg/png>",   # required
-    "audio_b64": "<base64 wav>|null",  # required for talk, null for idle
-    "mode": "talk" | "idle",
-    "duration": <float seconds>,          # used for idle
-    "fps": <int, default 25>
-  }
-  -> 200 video/mp4 (raw bytes, starts with an mp4 'ftyp' box)
-  -> 4xx/5xx application/json { "error": "..." }
+  { image_b64, audio_b64|null, mode: talk|idle, duration, fps }
+  -> 202 application/json { job_id, status: pending }
 
-GET /avatar/health -> { "status": "ok", "talk": bool, "idle": bool, "device": str }
+GET /avatar/result/<job_id>
+  -> 202 application/json { status: pending|running }   (still working)
+  -> 200 video/mp4                                       (done)
+  -> 5xx application/json { status: error, error }       (failed)
+
+GET /avatar/health -> { status, talk, idle, device, max_side }
 
 Usage in Colab
 --------------
@@ -34,26 +35,20 @@ Usage in Colab
   from flask import Flask
   app = Flask(__name__)
   register_avatar_routes(app)      # or pass your existing VoxCPM app
-  app.run(port=7860)
+  app.run(port=7860, threaded=True)
 
-Env vars
---------
-  SADTALKER_DIR      path to SadTalker repo (default ./SadTalker)
-  LIVEPORTRAIT_DIR   path to LivePortrait repo (default ./LivePortrait)
-  IDLE_DRIVING       path to a short neutral driving video for idle (optional)
-  AVATAR_MAX_SIDE    max image side, default 512 (keep small on T4)
-  AVATAR_FP16        '1' to prefer fp16 (default '1')
-  AVATAR_FPS         default fps, default 25
-  AVATAR_WORKDIR     scratch dir, default /content/avatar_work
-  AVATAR_PORT        default 5000
+Env vars: SADTALKER_DIR, LIVEPORTRAIT_DIR, IDLE_DRIVING, AVATAR_MAX_SIDE,
+AVATAR_FP16, AVATAR_FPS, AVATAR_WORKDIR, AVATAR_PORT.
 """
 import base64
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file
@@ -79,6 +74,15 @@ WORKDIR = Path(os.environ.get('AVATAR_WORKDIR', '/content/avatar_work'))
 PORT = int(os.environ.get('AVATAR_PORT', '5000'))
 
 WORKDIR.mkdir(parents=True, exist_ok=True)
+
+# --- Async job registry -------------------------------------------------------
+# Cloudflare quick tunnels drop any single request that runs past ~100s (HTTP
+# 524). Avatar renders can take several minutes, so /avatar enqueues a job and
+# returns immediately; the client polls /avatar/result/<job_id> (each poll is
+# fast). A single render lock keeps GPU work serialized on the shared T4.
+_JOBS = {}
+_JOBS_LOCK = threading.Lock()
+_RENDER_LOCK = threading.Lock()
 
 
 def _log(*a):
@@ -260,8 +264,70 @@ def _render_liveportrait_idle(image: Path, out_dir: Path, seconds: float, fps: i
     return looped
 
 
-def _handle_avatar():
+def _do_render(image_b64, audio_b64, mode, duration, fps) -> Path:
+    """Blocking render. Dipanggil dari worker thread (bukan dari request handler)."""
+    job = Path(tempfile.mkdtemp(prefix='job_', dir=str(WORKDIR)))
+    img_path = _prep_image(base64.b64decode(image_b64), job / 'src.png')
+    out_dir = job / 'out'
+
+    if mode == 'idle':
+        # Prefer LivePortrait for natural idle; fall back to still SadTalker.
+        try:
+            if _liveportrait_available():
+                vid = _render_liveportrait_idle(img_path, out_dir, duration, fps)
+            else:
+                raise RuntimeError('LivePortrait unavailable')
+        except Exception as e:
+            _log('idle fallback to SadTalker still:', e)
+            sil = job / 'silence.wav'
+            _make_silent_wav(sil, duration, fps)
+            vid = _render_sadtalker(img_path, sil, out_dir, fps)
+            # Samakan panjang dengan durasi segmen (loop kalau kurang).
+            vid = _loop_to_duration(vid, out_dir / 'idle_full.mp4', duration, fps)
+    else:
+        aud_path = job / 'drive.wav'
+        aud_path.write_bytes(base64.b64decode(audio_b64))
+        vid = _render_sadtalker(img_path, aud_path, out_dir, fps)
+
+    # Normalize container/fps so the desktop app always gets a clean mp4.
+    final = job / 'avatar.mp4'
+    _run([
+        'ffmpeg', '-y', '-i', str(vid),
+        '-r', str(fps), '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart', '-c:v', 'libx264', '-crf', '20',
+        str(final),
+    ])
+    return final
+
+
+def _run_job(job_id, params):
+    """Worker thread: render satu job dan simpan status/hasil di _JOBS."""
     t0 = time.time()
+    with _JOBS_LOCK:
+        if job_id in _JOBS:
+            _JOBS[job_id]['status'] = 'running'
+    # Serialize GPU work: only one render at a time on the shared T4.
+    with _RENDER_LOCK:
+        try:
+            final = _do_render(**params)
+            with _JOBS_LOCK:
+                _JOBS[job_id].update(status='done', path=str(final))
+            _log('job ' + job_id + ' (' + params['mode'] + ') done in %.1fs -> %s' % (time.time() - t0, final))
+        except subprocess.TimeoutExpired:
+            with _JOBS_LOCK:
+                _JOBS[job_id].update(status='error', error='render timeout')
+        except Exception as e:  # pragma: no cover
+            traceback.print_exc()
+            with _JOBS_LOCK:
+                _JOBS[job_id].update(status='error', error=str(e))
+
+
+def _handle_avatar():
+    """Terima job render, jalankan di background, balikan job_id segera (202).
+
+    Async by design: Cloudflare quick tunnels putus di ~100 detik (HTTP 524),
+    sedangkan render SadTalker bisa lebih lama. Client lalu polling
+    /avatar/result/<job_id> yang tiap responsnya cepat."""
     try:
         data = request.get_json(force=True, silent=True) or {}
         image_b64 = data.get('image_b64')
@@ -277,44 +343,40 @@ def _handle_avatar():
         if not _sadtalker_available():
             return jsonify({'error': 'SadTalker not installed on this host'}), 503
 
-        job = Path(tempfile.mkdtemp(prefix='job_', dir=str(WORKDIR)))
-        img_path = _prep_image(base64.b64decode(image_b64), job / 'src.png')
-        out_dir = job / 'out'
-
-        if mode == 'idle':
-            # Prefer LivePortrait for natural idle; fall back to still SadTalker.
-            try:
-                if _liveportrait_available():
-                    vid = _render_liveportrait_idle(img_path, out_dir, duration, fps)
-                else:
-                    raise RuntimeError('LivePortrait unavailable')
-            except Exception as e:
-                _log('idle fallback to SadTalker still:', e)
-                sil = job / 'silence.wav'
-                _make_silent_wav(sil, duration, fps)
-                vid = _render_sadtalker(img_path, sil, out_dir, fps)
-                # Samakan panjang dengan durasi segmen (loop kalau kurang).
-                vid = _loop_to_duration(vid, out_dir / 'idle_full.mp4', duration, fps)
-        else:
-            aud_path = job / 'drive.wav'
-            aud_path.write_bytes(base64.b64decode(audio_b64))
-            vid = _render_sadtalker(img_path, aud_path, out_dir, fps)
-
-        # Normalize container/fps so the desktop app always gets a clean mp4.
-        final = job / 'avatar.mp4'
-        _run([
-            'ffmpeg', '-y', '-i', str(vid),
-            '-r', str(fps), '-pix_fmt', 'yuv420p',
-            '-movflags', '+faststart', '-c:v', 'libx264', '-crf', '20',
-            str(final),
-        ])
-        _log(f'{mode} done in {time.time() - t0:.1f}s -> {final}')
-        return send_file(str(final), mimetype='video/mp4')
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': 'render timeout'}), 504
+        job_id = uuid.uuid4().hex
+        params = {
+            'image_b64': image_b64,
+            'audio_b64': audio_b64,
+            'mode': mode,
+            'duration': duration,
+            'fps': fps,
+        }
+        with _JOBS_LOCK:
+            _JOBS[job_id] = {'status': 'pending', 'path': None, 'error': None}
+        threading.Thread(target=_run_job, args=(job_id, params), daemon=True).start()
+        _log('queued job', job_id, 'mode', mode, 'duration', duration)
+        return jsonify({'job_id': job_id, 'status': 'pending'}), 202
     except Exception as e:  # pragma: no cover
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+
+def _handle_avatar_result(job_id):
+    """Polling hasil job: 202 selama proses, mp4 saat selesai, 5xx saat gagal."""
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        snapshot = dict(job) if job else None
+    if not snapshot:
+        return jsonify({'status': 'error', 'error': 'unknown job_id'}), 404
+    status = snapshot.get('status')
+    if status in ('pending', 'running'):
+        return jsonify({'status': status}), 202
+    if status == 'error':
+        return jsonify({'status': 'error', 'error': snapshot.get('error') or 'render failed'}), 500
+    path = snapshot.get('path')
+    if not path or not Path(path).exists():
+        return jsonify({'status': 'error', 'error': 'result file missing'}), 500
+    return send_file(path, mimetype='video/mp4')
 
 
 def _handle_health():
@@ -330,6 +392,7 @@ def _handle_health():
 def register_avatar_routes(app):
     """Attach the /avatar routes to an existing Flask app (e.g. the VoxCPM app)."""
     app.add_url_rule('/avatar', 'avatar', _handle_avatar, methods=['POST'])
+    app.add_url_rule('/avatar/result/<job_id>', 'avatar_result', _handle_avatar_result, methods=['GET'])
     app.add_url_rule('/avatar/health', 'avatar_health', _handle_health, methods=['GET'])
     return app
 
