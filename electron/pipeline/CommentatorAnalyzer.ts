@@ -268,7 +268,7 @@ Return ONLY a JSON object (no markdown, no text outside JSON):
     let lastError: Error | null = null;
 
     for (const model of models) {
-      const url = `{{https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}}}/locations/us-central1/publishers/google/models/${model}:generateContent`;
+      const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/${model}:generateContent`;
 
       const payload = {
         contents: [
