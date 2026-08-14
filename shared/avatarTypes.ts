@@ -34,6 +34,12 @@ export interface AvatarOverlay {
 	shape: AvatarShape;
 	/** Optional dedicated engine base URL. Empty => fall back to xttsColabUrl. */
 	colabUrl?: string;
+	/**
+	 * When true, the avatar's photo background is matted away on the engine so
+	 * only the person remains (alpha video). Additive: default off keeps the
+	 * original opaque clip and current behavior.
+	 */
+	removeBackground?: boolean;
 }
 
 /**
@@ -55,6 +61,7 @@ export const DEFAULT_AVATAR_OVERLAY: AvatarOverlay = {
 	scale: 0.28,
 	margin: 48,
 	shape: 'circle',
+	removeBackground: false,
 };
 
 // ---------------------------------------------------------------------------
