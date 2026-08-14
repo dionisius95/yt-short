@@ -9,13 +9,14 @@
  * pipeline output unchanged.
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ipc } from '../../lib/ipc-client';
 import { cn } from '../../lib/utils';
 import {
   DEFAULT_AVATAR_OVERLAY,
   type AvatarOverlay,
   type AvatarPosition,
+  type AvatarPreset,
   type AvatarShape,
 } from '../../../shared/avatarTypes';
 
@@ -24,11 +25,11 @@ const CANVAS_W = 1080;
 const CANVAS_H = 1920;
 
 const POSITION_OPTS: { value: AvatarPosition; label: string }[] = [
-  { value: 'top-left', label: '\u2196 Kiri Atas' },
-  { value: 'top-right', label: '\u2197 Kanan Atas' },
-  { value: 'bottom-left', label: '\u2199 Kiri Bawah' },
-  { value: 'bottom-right', label: '\u2198 Kanan Bawah' },
-  { value: 'center', label: '\u25CF Tengah' },
+  { value: 'top-left', label: '↖ Kiri Atas' },
+  { value: 'top-right', label: '↗ Kanan Atas' },
+  { value: 'bottom-left', label: '↙ Kiri Bawah' },
+  { value: 'bottom-right', label: '↘ Kanan Bawah' },
+  { value: 'center', label: '● Tengah' },
 ];
 
 const SHAPE_OPTS: { value: AvatarShape; label: string }[] = [
@@ -94,6 +95,102 @@ export function AvatarControls({ value, onChange }: AvatarControlsProps) {
   const [dragging, setDragging] = useState(false);
   const [imgOk, setImgOk] = useState(true);
 
+  // Custom Presets from SQLite Database
+  const [customPresets, setCustomPresets] = useState<AvatarPreset[]>([]);
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
+  const [showSavePresetModal, setShowSavePresetModal] = useState(false);
+  const [presetNameInput, setPresetNameInput] = useState('');
+  const [includeImageInPreset, setIncludeImageInPreset] = useState(true);
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [deletingPreset, setDeletingPreset] = useState(false);
+
+  // Load custom presets on mount
+  useEffect(() => {
+    let active = true;
+    ipc.avatarPresets
+      .get()
+      .then((list) => {
+        if (active && Array.isArray(list)) {
+          setCustomPresets(list);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const applyCustomPreset = (preset: AvatarPreset) => {
+    const s = preset.settings;
+    if (!s) return;
+    const next: Partial<AvatarOverlay> = {
+      position: s.position,
+      x: s.x,
+      y: s.y,
+      scale: s.scale ?? overlay.scale,
+      margin: s.margin ?? overlay.margin,
+      shape: s.shape ?? overlay.shape,
+      removeBackground: s.removeBackground ?? overlay.removeBackground,
+    };
+    if (s.imagePath) {
+      next.imagePath = s.imagePath;
+      setImgOk(true);
+    }
+    if (s.colabUrl !== undefined) {
+      next.colabUrl = s.colabUrl;
+    }
+    patch(next);
+  };
+
+  const handleSavePresetSubmit = async () => {
+    if (!presetNameInput.trim()) return;
+    setSavingPreset(true);
+    try {
+      const newPreset: AvatarPreset = {
+        id: `avatar_preset_${Date.now()}`,
+        name: presetNameInput.trim(),
+        settings: {
+          position: overlay.position,
+          x: isManual ? overlay.x : undefined,
+          y: isManual ? overlay.y : undefined,
+          scale: overlay.scale,
+          margin: overlay.margin,
+          shape: overlay.shape,
+          removeBackground: overlay.removeBackground,
+          imagePath: includeImageInPreset && overlay.imagePath ? overlay.imagePath : undefined,
+          colabUrl: overlay.colabUrl,
+        },
+        createdAt: Date.now(),
+      };
+
+      await ipc.avatarPresets.save(newPreset);
+      const updated = [newPreset, ...customPresets.filter((p) => p.id !== newPreset.id)];
+      setCustomPresets(updated);
+      setSelectedPresetId(newPreset.id);
+      setShowSavePresetModal(false);
+      setPresetNameInput('');
+    } catch (err) {
+      console.error('Failed to save avatar preset:', err);
+    } finally {
+      setSavingPreset(false);
+    }
+  };
+
+  const handleDeletePreset = async () => {
+    if (!selectedPresetId) return;
+    setDeletingPreset(true);
+    try {
+      await ipc.avatarPresets.delete(selectedPresetId);
+      const updated = customPresets.filter((p) => p.id !== selectedPresetId);
+      setCustomPresets(updated);
+      setSelectedPresetId(null);
+    } catch (err) {
+      console.error('Failed to delete avatar preset:', err);
+    } finally {
+      setDeletingPreset(false);
+    }
+  };
+
   const handlePickImage = async () => {
     try {
       const file = await ipc.dialog.openFile();
@@ -107,14 +204,20 @@ export function AvatarControls({ value, onChange }: AvatarControlsProps) {
   };
 
   // Switch to a named preset: drop the manual x/y so the preset math applies.
-  const selectPreset = (position: AvatarPosition) =>
+  const selectPreset = (position: AvatarPosition) => {
+    setSelectedPresetId(null);
     patch({ position, x: undefined, y: undefined });
+  };
 
   // Set an absolute X (keeps the current preset as a fallback label only).
-  const setManualX = (x: number) =>
+  const setManualX = (x: number) => {
+    setSelectedPresetId(null);
     patch({ x: clamp(Math.round(x), 0, maxX), y: isManual ? overlay.y : curY });
-  const setManualY = (y: number) =>
+  };
+  const setManualY = (y: number) => {
+    setSelectedPresetId(null);
     patch({ y: clamp(Math.round(y), 0, maxY), x: isManual ? overlay.x : curX });
+  };
 
   // Drag the avatar box inside the preview to set X/Y directly.
   const applyPointer = useCallback(
@@ -127,6 +230,7 @@ export function AvatarControls({ value, onChange }: AvatarControlsProps) {
       // Center the box on the cursor, then convert to top-left canvas coords.
       const cxCanvas = (clientX - rect.left) * sx;
       const cyCanvas = (clientY - rect.top) * sy;
+      setSelectedPresetId(null);
       patch({
         x: clamp(Math.round(cxCanvas - boxW / 2), 0, maxX),
         y: clamp(Math.round(cyCanvas - boxH / 2), 0, maxY),
@@ -180,6 +284,53 @@ export function AvatarControls({ value, onChange }: AvatarControlsProps) {
 
       {overlay.enabled && (
         <div className="flex flex-col gap-4 pl-7">
+          {/* Custom Preset Bar (Database Persistence) */}
+          <div className="flex flex-col gap-2 rounded-xl border border-indigo-500/30 bg-indigo-950/20 p-3 shadow-inner">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
+                <span>✨</span> Preset Avatar Custom
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setShowSavePresetModal(true)}
+                  className="rounded-md bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-500 transition-colors shadow-sm"
+                >
+                  + Simpan Preset
+                </button>
+                {selectedPresetId && (
+                  <button
+                    type="button"
+                    disabled={deletingPreset}
+                    onClick={handleDeletePreset}
+                    className="rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] font-medium text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+                  >
+                    {deletingPreset ? 'Menghapus...' : 'Hapus'}
+                  </button>
+                )}
+              </div>
+            </div>
+            <select
+              value={selectedPresetId || ''}
+              onChange={(e) => {
+                const val = e.target.value;
+                setSelectedPresetId(val || null);
+                if (val) {
+                  const found = customPresets.find((p) => p.id === val);
+                  if (found) applyCustomPreset(found);
+                }
+              }}
+              className="w-full rounded-lg border border-white/15 bg-surface-elevated px-3 py-1.5 text-xs text-text-primary focus:border-indigo-500 focus:outline-none"
+            >
+              <option value="">-- Pilih Preset Custom ({customPresets.length} tersimpan) --</option>
+              {customPresets.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.settings.shape === 'circle' ? 'Bulat' : 'Kotak'}, {Math.round(p.settings.scale * 100)}%{p.settings.imagePath ? ', +Foto' : ''})
+                </option>
+              ))}
+            </select>
+          </div>
+
           {/* Image upload */}
           <div className="flex flex-col gap-1.5">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">Foto Avatar</span>
@@ -406,6 +557,114 @@ export function AvatarControls({ value, onChange }: AvatarControlsProps) {
             <p className="text-[10px] text-text-secondary">
               Jika kosong, avatar di-generate lewat Colab URL yang sama dengan voice clone Anda.
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Save Custom Preset Modal */}
+      {showSavePresetModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-xl border border-white/15 bg-surface-elevated p-5 shadow-2xl flex flex-col gap-4">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-base">✨</span>
+                <h3 className="text-sm font-semibold text-text-primary">
+                  Simpan Preset Avatar Custom
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSavePresetModal(false)}
+                className="text-text-secondary hover:text-text-primary text-sm font-bold p-1"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
+                  Nama Preset
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  value={presetNameInput}
+                  onChange={(e) => setPresetNameInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && presetNameInput.trim()) {
+                      handleSavePresetSubmit();
+                    }
+                  }}
+                  placeholder="Contoh: Host Pojok Kanan Bawah, Edukasi Bulat..."
+                  className="rounded-lg border border-white/15 bg-background px-3 py-2 text-xs text-text-primary placeholder:text-text-secondary/50 focus:border-indigo-500 focus:outline-none"
+                />
+              </div>
+
+              {overlay.imagePath && (
+                <label className="flex items-center gap-2.5 cursor-pointer rounded-lg border border-white/10 bg-white/5 p-2.5">
+                  <input
+                    type="checkbox"
+                    checked={includeImageInPreset}
+                    onChange={(e) => setIncludeImageInPreset(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-indigo-500 rounded"
+                  />
+                  <span className="text-xs text-text-primary">
+                    Sertakan foto avatar saat ini (<span className="text-indigo-300 font-mono text-[11px]">{overlay.imagePath.split(/[/\\]/).pop()}</span>)
+                  </span>
+                </label>
+              )}
+
+              <div className="rounded-lg border border-white/10 bg-white/5 p-3 flex flex-col gap-1.5 text-[11px] text-text-secondary">
+                <span className="font-semibold text-text-primary uppercase tracking-wider text-[10px]">
+                  Konfigurasi yang akan disimpan:
+                </span>
+                <div className="grid grid-cols-2 gap-x-2 gap-y-1">
+                  <div>
+                    Posisi:{' '}
+                    <span className="text-text-primary font-medium">
+                      {isManual ? `Manual (${Math.round(curX)}, ${Math.round(curY)})` : overlay.position}
+                    </span>
+                  </div>
+                  <div>
+                    Bentuk:{' '}
+                    <span className="text-text-primary font-medium">
+                      {overlay.shape === 'circle' ? 'Bulat' : 'Kotak'}
+                    </span>
+                  </div>
+                  <div>
+                    Ukuran:{' '}
+                    <span className="text-text-primary font-medium">
+                      {Math.round(overlay.scale * 100)}%
+                    </span>
+                  </div>
+                  <div>
+                    Hapus BG:{' '}
+                    <span className="text-text-primary font-medium">
+                      {overlay.removeBackground ? 'Ya' : 'Tidak'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 border-t border-white/10 pt-3">
+              <button
+                type="button"
+                onClick={() => setShowSavePresetModal(false)}
+                className="rounded-lg border border-white/10 bg-surface-elevated px-3.5 py-1.5 text-xs font-medium text-text-secondary hover:bg-white/5 hover:text-text-primary transition-colors"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={!presetNameInput.trim() || savingPreset}
+                onClick={handleSavePresetSubmit}
+                className="rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {savingPreset ? 'Menyimpan...' : 'Simpan ke Database'}
+              </button>
+            </div>
           </div>
         </div>
       )}

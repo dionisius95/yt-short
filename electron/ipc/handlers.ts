@@ -90,6 +90,12 @@ export interface IpcServices {
   getPresets: () => Promise<import('../../shared/types').PreviewPreset[]>;
   /** Saves preview presets */
   savePresets: (presets: import('../../shared/types').PreviewPreset[]) => Promise<void>;
+  /** Gets avatar presets */
+  getAvatarPresets: () => Promise<import('../../shared/avatarTypes').AvatarPreset[]>;
+  /** Saves avatar preset */
+  saveAvatarPreset: (preset: import('../../shared/avatarTypes').AvatarPreset) => Promise<import('../../shared/avatarTypes').AvatarPreset>;
+  /** Deletes avatar preset by id */
+  deleteAvatarPreset: (id: string) => Promise<void>;
   /** Runs the full pipeline (transcribe → analyze → process) for a project */
   runPipeline: (projectId: string, opts?: Record<string, boolean>) => Promise<void>;
   /** Cancels an in-progress pipeline run */
@@ -318,6 +324,18 @@ export function registerIpcHandlers(services: IpcServices): void {
 
   ipcMain.handle(CHANNELS.PRESETS_SAVE, async (_event, presets: import('../../shared/types').PreviewPreset[]) => {
     return services.savePresets(presets);
+  });
+
+  ipcMain.handle(CHANNELS.AVATAR_PRESETS_GET, async () => {
+    return services.getAvatarPresets();
+  });
+
+  ipcMain.handle(CHANNELS.AVATAR_PRESETS_SAVE, async (_event, preset: import('../../shared/avatarTypes').AvatarPreset) => {
+    return services.saveAvatarPreset(preset);
+  });
+
+  ipcMain.handle(CHANNELS.AVATAR_PRESETS_DELETE, async (_event, id: string) => {
+    return services.deleteAvatarPreset(id);
   });
 
   // ---------------------------------------------------------------------------

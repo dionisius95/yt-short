@@ -88,6 +88,9 @@ export const CHANNELS = {
   ACCOUNTS_SAVE: 'accounts:save',
   PRESETS_GET: 'presets:get',
   PRESETS_SAVE: 'presets:save',
+  AVATAR_PRESETS_GET: 'avatar-presets:get',
+  AVATAR_PRESETS_SAVE: 'avatar-presets:save',
+  AVATAR_PRESETS_DELETE: 'avatar-presets:delete',
 
   // ---------------------------------------------------------------------------
   // Dependencies

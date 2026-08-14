@@ -35,6 +35,17 @@ export function initDatabase(dbPath: string): Database.Database {
   try { db.exec('ALTER TABLE clips ADD COLUMN tiktok_url TEXT'); } catch { /* already exists */ }
   try { db.exec('ALTER TABLE clips ADD COLUMN facebook_url TEXT'); } catch { /* already exists */ }
   try { db.exec('ALTER TABLE clips ADD COLUMN telegram_url TEXT'); } catch { /* already exists */ }
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS avatar_presets (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        data_json   TEXT NOT NULL,
+        created_at  INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_avatar_presets_created ON avatar_presets(created_at);
+    `);
+  } catch { /* already exists */ }
 
   _db = db;
   return db;

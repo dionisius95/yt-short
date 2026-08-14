@@ -13,6 +13,7 @@ import { ProjectRepo } from './db/repositories/ProjectRepo';
 import { TranscriptRepo } from './db/repositories/TranscriptRepo';
 import { HookRepo } from './db/repositories/HookRepo';
 import { ClipRepo } from './db/repositories/ClipRepo';
+import { AvatarPresetRepo } from './db/repositories/AvatarPresetRepo';
 import { Downloader } from './pipeline/Downloader';
 import { Transcriber } from './pipeline/Transcriber';
 import { Analyzer } from './pipeline/Analyzer';
@@ -49,6 +50,7 @@ let projectRepo: ProjectRepo;
 let transcriptRepo: TranscriptRepo;
 let hookRepo: HookRepo;
 let clipRepo: ClipRepo;
+let avatarPresetRepo: AvatarPresetRepo;
 
 // ---------------------------------------------------------------------------
 // Pipeline services (singletons)
@@ -1752,6 +1754,9 @@ The prompt should describe the scene, the central subject, the color palette, li
   saveAccounts: async (accounts: any) => configManager.saveAccounts(accounts),
   getPresets: async () => configManager.getPreviewPresets(),
   savePresets: async (presets: any) => configManager.savePreviewPresets(presets),
+  getAvatarPresets: async () => (avatarPresetRepo ? avatarPresetRepo.getAll() : []),
+  saveAvatarPreset: async (preset: any) => (avatarPresetRepo ? avatarPresetRepo.save(preset) : preset),
+  deleteAvatarPreset: async (id: string) => { if (avatarPresetRepo) avatarPresetRepo.delete(id); },
 };
 
 function createWindow(): void {
@@ -1865,6 +1870,7 @@ app.whenReady().then(() => {
   transcriptRepo = new TranscriptRepo(db);
   hookRepo      = new HookRepo(db);
   clipRepo      = new ClipRepo(db);
+  avatarPresetRepo = new AvatarPresetRepo(db);
 
   try {
     clipRepo.resetStuckClips();

@@ -2918,26 +2918,28 @@ export class Processor {
     // Add 500ms buffer so Segment B audio/video doesn't get cut by xfade transition
     const processEndMs = (inputSource === sourceFile ? endMs : (endMs - startMs)) + 500;
 
-    // Normalize segBWords timestamps so w.startMs and w.endMs align with processStartMs and processEndMs
+    // Normalize segBWords timestamps to match the timeline that `process()` expects.
+    // `process()` input-seeks its source by `startMs` and offsets subtitles by the same
+    // amount, so words must live in the SAME timeline as the startMs/endMs passed to it.
+    // Decide deterministically from the WORD SOURCE, never by guessing from a single
+    // timestamp: the old `firstStart < startMs` heuristic wrongly shifted absolute words
+    // by +startMs whenever a boundary word started just before the cut, pushing every
+    // subtitle out of range -> Segment B subtitles vanished.
+    //   - originalTranscriptWords / project words -> ABSOLUTE full-video time
+    //   - reactionWords fallback                  -> already CLIP-relative (TTS 0-based)
     let normalizedWords: TranscriptWord[] = [];
     if (rawSegBWords.length > 0) {
-      const firstStart = rawSegBWords[0].startMs;
-      if (inputSource === sourceFile && firstStart < startMs) {
-        // Words are clip-relative (0..duration), shift them to full video timeline (startMs..endMs)
-        normalizedWords = rawSegBWords.map((w) => ({
-          ...w,
-          startMs: w.startMs + startMs,
-          endMs: w.endMs + startMs,
-        }));
-      } else if (inputSource !== sourceFile && firstStart >= startMs && startMs > 0) {
-        // Words are full-video relative, shift them to clip-relative timeline (0..duration)
-        normalizedWords = rawSegBWords.map((w) => ({
-          ...w,
-          startMs: Math.max(0, w.startMs - startMs),
-          endMs: Math.max(0, w.endMs - startMs),
-        }));
+      const usingReactionFallback = origWords.length === 0;
+      if (inputSource === sourceFile) {
+        // process() seeks to absolute `startMs` -> words must be ABSOLUTE
+        normalizedWords = usingReactionFallback
+          ? rawSegBWords.map((w) => ({ ...w, startMs: w.startMs + startMs, endMs: w.endMs + startMs }))
+          : rawSegBWords;
       } else {
-        normalizedWords = rawSegBWords;
+        // process() seeks from 0 on the pre-cut clip -> words must be CLIP-relative
+        normalizedWords = usingReactionFallback
+          ? rawSegBWords
+          : rawSegBWords.map((w) => ({ ...w, startMs: Math.max(0, w.startMs - startMs), endMs: Math.max(0, w.endMs - startMs) }));
       }
     }
 
@@ -3114,6 +3116,7 @@ export class Processor {
         gamePosition: parsedOpts.gamePosition,
         letterboxBg: parsedOpts.letterboxBg,
         logoOverlay: parsedOpts.logoOverlay,
+        titleOverlay: parsedOpts.titleOverlay,
         words: [],
         captionStyle: { ...CAPTION_PRESETS['none'], presetId: 'none' },
       });

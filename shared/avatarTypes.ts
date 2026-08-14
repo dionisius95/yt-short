@@ -64,6 +64,23 @@ export const DEFAULT_AVATAR_OVERLAY: AvatarOverlay = {
 	removeBackground: false,
 };
 
+export interface AvatarPreset {
+	id: string;
+	name: string;
+	settings: {
+		position: AvatarPosition;
+		x?: number;
+		y?: number;
+		scale: number;
+		margin: number;
+		shape: AvatarShape;
+		removeBackground?: boolean;
+		imagePath?: string;
+		colabUrl?: string;
+	};
+	createdAt: number;
+}
+
 // ---------------------------------------------------------------------------
 // Module augmentation (ADDITIVE)
 // Extend the existing shared IPC types WITHOUT editing the large types.ts.

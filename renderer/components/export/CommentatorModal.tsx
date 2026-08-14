@@ -8,7 +8,7 @@
 
 import { useState, useEffect } from 'react';
 import { ipc } from '../../lib/ipc-client';
-import type { CaptionPresetId, CaptionStyle, CaptionFont, SubtitlePosition, CommentatorVoiceProvider, CommentatorTransitionEffect } from '../../../shared/types';
+import type { CaptionPresetId, CaptionStyle, CaptionFont, CommentatorVoiceProvider, CommentatorTransitionEffect } from '../../../shared/types';
 import { CAPTION_PRESETS } from '../../../shared/types';
 import { cn } from '../../lib/utils';
 import { AvatarControls } from '../project/AvatarControls';

@@ -413,6 +413,18 @@ export const ipc = {
     },
   },
 
+  avatarPresets: {
+    get(): Promise<import('../../shared/avatarTypes').AvatarPreset[]> {
+      return invoke<import('../../shared/avatarTypes').AvatarPreset[]>('avatar-presets:get');
+    },
+    save(preset: import('../../shared/avatarTypes').AvatarPreset): Promise<import('../../shared/avatarTypes').AvatarPreset> {
+      return invoke<import('../../shared/avatarTypes').AvatarPreset>('avatar-presets:save', preset);
+    },
+    delete(id: string): Promise<void> {
+      return invoke<void>('avatar-presets:delete', id);
+    },
+  },
+
   // -------------------------------------------------------------------------
   // Dependencies
   // -------------------------------------------------------------------------

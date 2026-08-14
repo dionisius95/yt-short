@@ -65,8 +65,18 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+-- Avatar Presets
+CREATE TABLE IF NOT EXISTS avatar_presets (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  data_json   TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_hooks_project      ON hooks(project_id);
 CREATE INDEX IF NOT EXISTS idx_clips_project      ON clips(project_id);
 CREATE INDEX IF NOT EXISTS idx_clips_hook         ON clips(hook_id);
 CREATE INDEX IF NOT EXISTS idx_transcripts_project ON transcripts(project_id);
+CREATE INDEX IF NOT EXISTS idx_avatar_presets_created ON avatar_presets(created_at);
+

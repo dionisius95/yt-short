@@ -102,15 +102,9 @@ function BrowseField({ id, label, value, onChange }: {
 export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) {
   const [form, setForm] = useState<AppSettings>({ ...settings });
   const [saving, setSaving] = useState(false);
-  const [authStatus, setAuthStatus] = useState<{ authenticated: boolean; email?: string } | null>(null);
 
   const set = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
-
-  // Load auth status once on mount
-  useEffect(() => {
-    void ipc.upload.getAuthStatus().then(setAuthStatus).catch(() => { });
-  }, []);
 
   const [tgOtpModal, setTgOtpModal] = useState(false);
   const [tgPhoneCodeHash, setTgPhoneCodeHash] = useState('');
@@ -229,22 +223,10 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
     }
     try {
       await ipc.upload.startAuth();
-      const status = await ipc.upload.getAuthStatus();
-      setAuthStatus(status);
       const list = await ipc.accounts.get();
       if (Array.isArray(list)) setAccounts(list);
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Authentication failed.');
-    }
-  };
-
-  const handleDisconnect = async () => {
-    try {
-      await ipc.upload.disconnectAuth();
-      const status = await ipc.upload.getAuthStatus();
-      setAuthStatus(status);
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Disconnect failed.');
     }
   };
 
