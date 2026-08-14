@@ -266,12 +266,14 @@ def _render_sadtalker(image: Path, audio: Path, out_dir: Path, fps: int) -> Path
     raise RuntimeError('SadTalker gagal render')
 
 
-def _lp_render_unit(image: Path, driving: Path, out_dir: Path, normalize_lip: bool) -> Path:
+def _lp_render_unit(image: Path, driving: Path, out_dir: Path, normalize_lip: bool, multiplier: float = 0.9) -> Path:
     """Render satu 'unit' ekspresif pendek: wajah user mengikuti klip driving.
 
     - normalize_lip=True  -> mulut DIKUNCI tertutup (dipakai untuk unit KEDIP).
     - normalize_lip=False -> biarkan gerak bibir tipis (dipakai untuk SENYUM).
-    driving_multiplier rendah (0.35) supaya gerak halus, tidak agresif.
+    KEDIP dirender amplitudo penuh (multiplier ~0.9) supaya mata BENAR-BENAR
+    menutup; SENYUM pakai multiplier rendah (~0.4) supaya halus/tidak agresif.
+    Kesan 'tidak agresif' datang dari penjarangan waktu acak, bukan meredam kedip.
     Flag dipilih dinamis dari `inference.py --help` (tidak menebak nama flag).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -289,7 +291,7 @@ def _lp_render_unit(image: Path, driving: Path, out_dir: Path, normalize_lip: bo
         elif '--flag_lip_zero' in help_txt:
             cmd.append('--flag_lip_zero')
     if '--driving_multiplier' in help_txt:
-        cmd += ['--driving_multiplier', '0.35']
+        cmd += ['--driving_multiplier', '%.2f' % multiplier]
     if '--flag_stitching' in help_txt:
         cmd.append('--flag_stitching')
     _run(cmd, cwd=LIVEPORTRAIT_DIR, timeout=900)
@@ -410,15 +412,15 @@ def _render_liveportrait_idle(image: Path, out_dir: Path, seconds: float, fps: i
         blink_src = Path(IDLE_DRIVING)
 
     units = {}
-    # Unit kedip: mulut DIKUNCI tertutup (normalize lip).
+    # Unit kedip: mulut DIKUNCI tertutup (normalize lip), amplitudo penuh (0.9).
     try:
-        units['blink'] = _lp_render_unit(image, blink_src, out_dir / 'u_blink', True)
+        units['blink'] = _lp_render_unit(image, blink_src, out_dir / 'u_blink', True, 0.9)
     except Exception as e:
         _log('blink unit gagal:', e)
     # Unit senyum: biarkan senyum tipis (JANGAN normalize lip); hanya bila ada sumbernya.
     if smile_src.exists():
         try:
-            units['smile'] = _lp_render_unit(image, smile_src, out_dir / 'u_smile', False)
+            units['smile'] = _lp_render_unit(image, smile_src, out_dir / 'u_smile', False, 0.4)
         except Exception as e:
             _log('smile unit gagal:', e)
 

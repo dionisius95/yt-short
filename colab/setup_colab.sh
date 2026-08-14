@@ -190,7 +190,7 @@ fi
 # klip BICARA / SENYUM konstan, dan setelah di-loop ping-pong ritmenya seragam
 # -> avatar Segmen B jadi komat-kamit / senyum terus / mata melirik kaku.
 # Sekarang kita KLASIFIKASI contoh driving lalu bikin DUA klip pendek:
-#   - idle_blink.mp4 : contoh yang gerak MATA dominan & mulut minim (kedip).
+#   - idle_blink.mp4 : contoh dgn KEDIP nyata (EAR turun tajam / kelopak menutup).
 #   - idle_smile.mp4 : contoh dengan gerak mulut ADA tapi tidak berosilasi
 #                      (bukan bicara) -> senyum tipis. Dilewati bila tak aman.
 # Server lalu menyusun timeline NON-periodik: netral + event pada waktu ACAK.
@@ -279,27 +279,125 @@ def _analyze(p, maxf=90):
                 mouthmax=float(mouth.max()), peaks=peaks,
                 eye_argmax=int(eye.argmax()), nframes=len(frames))
 
+# --- KEDIP SEJATI via Eye Aspect Ratio (EAR) dari landmark wajah ---
+# Gerak area mata TIDAK bisa membedakan kedip (kelopak menutup) dari lirik
+# kanan-kiri. EAR = rasio tinggi:lebar mata; turun tajam HANYA saat kelopak
+# menutup -> inilah sinyal kedip yang benar (menolak lirikan).
+_FA = [None]
+
+
+def _get_fa():
+    if _FA[0] is not None:
+        return _FA[0] or None
+    try:
+        import face_alignment
+        try:
+            lt = face_alignment.LandmarksType.TWO_D
+        except AttributeError:
+            lt = face_alignment.LandmarksType._2D
+        dev = "cpu"
+        try:
+            import torch
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            pass
+        _FA[0] = face_alignment.FaceAlignment(lt, flip_input=False, device=dev)
+    except Exception as e:
+        print("[drv] face-alignment tak tersedia (", e, ") -> pakai motion heuristik")
+        _FA[0] = False
+    return _FA[0] or None
+
+
+def _ear_series(p, maxf=150):
+    fa = _get_fa()
+    if fa is None:
+        return None
+    cap = cv2.VideoCapture(p)
+    ears, idx = [], 0
+    while idx < maxf:
+        ok, f = cap.read()
+        if not ok:
+            break
+        idx += 1
+        try:
+            preds = fa.get_landmarks(cv2.cvtColor(f, cv2.COLOR_BGR2RGB))
+        except Exception:
+            preds = None
+        if not preds:
+            ears.append(np.nan)
+            continue
+        lm = np.asarray(preds[0], dtype="float32")
+
+        def _ear(e):
+            a = np.linalg.norm(lm[e[1]] - lm[e[5]])
+            b = np.linalg.norm(lm[e[2]] - lm[e[4]])
+            c = np.linalg.norm(lm[e[0]] - lm[e[3]]) + 1e-6
+            return (a + b) / (2.0 * c)
+
+        ears.append(0.5 * (_ear([36, 37, 38, 39, 40, 41]) + _ear([42, 43, 44, 45, 46, 47])))
+    cap.release()
+    return np.asarray(ears, dtype="float32")
+
+
+def _pick_blink_ear():
+    best = None
+    for p in cands:
+        s = _ear_series(p)
+        if s is None:
+            return "NOFA"
+        v = s[~np.isnan(s)]
+        if v.size < 5:
+            continue
+        base = float(np.median(v))
+        mn = float(np.nanmin(s))
+        drop = (base - mn) / (base + 1e-6)
+        fidx = int(np.nanargmin(s))
+        print("[drv] EAR", os.path.basename(p),
+              "base=%.3f min=%.3f drop=%.2f" % (base, mn, drop))
+        # drop >= 0.28 = kelopak benar-benar menutup (bukan sekadar lirikan).
+        if drop >= 0.28 and (best is None or drop > best["drop"]):
+            best = dict(path=p, drop=drop, fidx=fidx)
+    return best
+
+
+blink_done = False
+picked = _pick_blink_ear()
+if picked == "NOFA":
+    picked = None
+elif picked:
+    bstart = max(0.0, picked["fidx"] / 25.0 - 0.22)
+    ok_b = _make(picked["path"], bstart, 0.9, os.path.join(ASSETS, "idle_blink.mp4"), 1.4)
+    print("[drv] BLINK(EAR) <-", os.path.basename(picked["path"]),
+          "drop=%.2f ok=" % picked["drop"], ok_b)
+    if ok_b:
+        _ff(["ffmpeg", "-y", "-i", os.path.join(ASSETS, "idle_blink.mp4"),
+             "-c", "copy", os.path.join(ASSETS, "idle_driving.mp4")])
+        blink_done = True
+else:
+    print("[drv] BLINK(EAR): tak ada kedip nyata di contoh -> coba motion heuristik")
+
 info = [a for a in (_analyze(p) for p in cands) if a]
 for a in info:
     print("[drv]", os.path.basename(a["path"]),
           "eye=%.3f mouth=%.3f peaks=%d" % (a["eye"], a["mouth"], a["peaks"]))
 
-if not info:
-    print("[idle] analisis kosong -> fallback heuristik")
-    _fallback_blink()
-    raise SystemExit(0)
+if not blink_done:
+    if not info:
+        print("[idle] analisis kosong -> fallback heuristik")
+        _fallback_blink()
+        raise SystemExit(0)
+    # Fallback: mata paling dominan (bisa jadi lirikan, tapi lebih baik dari nihil).
+    blink = max(info, key=lambda a: a["eye"] / (a["mouth"] + 0.05))
+    bstart = max(0.0, blink["eye_argmax"] / 25.0 - 0.15)
+    ok_b = _make(blink["path"], bstart, 0.8, os.path.join(ASSETS, "idle_blink.mp4"), 1.5)
+    print("[drv] BLINK(motion) <-", os.path.basename(blink["path"]), "ok=", ok_b)
+    if ok_b:
+        _ff(["ffmpeg", "-y", "-i", os.path.join(ASSETS, "idle_blink.mp4"),
+             "-c", "copy", os.path.join(ASSETS, "idle_driving.mp4")])
 
-# BLINK: rasio mata:mulut tertinggi (mata dominan, mulut minim).
-blink = max(info, key=lambda a: a["eye"] / (a["mouth"] + 0.05))
-bstart = max(0.0, blink["eye_argmax"] / 25.0 - 0.15)
-ok_b = _make(blink["path"], bstart, 0.8, os.path.join(ASSETS, "idle_blink.mp4"), 1.5)
-print("[drv] BLINK <-", os.path.basename(blink["path"]), "ok=", ok_b)
-if ok_b:
-    _ff(["ffmpeg", "-y", "-i", os.path.join(ASSETS, "idle_blink.mp4"),
-         "-c", "copy", os.path.join(ASSETS, "idle_driving.mp4")])
-
-# SMILE: ada gerak mulut TAPI peaks sedikit (bukan bicara), bukan si blink.
-sm = [a for a in info if a["peaks"] <= 3 and a["mouth"] > 0.05 and a["path"] != blink["path"]]
+# SMILE: ada gerak mulut TAPI peaks sedikit (bukan bicara), bukan klip kedip.
+blink_path = picked["path"] if picked else None
+sm = [a for a in info if a["peaks"] <= 3 and a["mouth"] > 0.05 and a["path"] != blink_path]
 if sm:
     smile = max(sm, key=lambda a: a["mouthmax"])
     ok_s = _make(smile["path"], 0.0, 0.9, os.path.join(ASSETS, "idle_smile.mp4"), 1.5)
