@@ -185,25 +185,24 @@ if [ ! -d "$WORK/LivePortrait" ]; then
   huggingface-cli download KwaiVGI/LivePortrait --local-dir "$WORK/LivePortrait/pretrained_weights" --exclude "*.git*" >/dev/null 2>&1 || true
 fi
 
-# --------- Idle driving video untuk Segment B (KEDIP HALUS, mulut tertutup) ---------
-# PENTING: dulu di sini asal ambil "driving example pertama" (head -n1) yang
-# ternyata klip orang BICARA -> LivePortrait meniru gerak mulut & alisnya ->
-# avatar Segmen B jadi komat-kamit / alis liar. Sekarang kita GENERATE klip
-# driving kedip halus sendiri: pilih contoh driving paling KALEM (durasi
-# terpendek), pangkas pendek, dan PERLAMBAT supaya geraknya minimal & lembut.
-# Mulut dijaga tetap tertutup di sisi render (flag lip-normalize di server).
-# Selalu regenerate (rm -f) supaya klip lama yang "bicara" tergantikan.
-echo "==> Generate idle driving (kedip halus, low-motion)"
-rm -f "$ASSETS/idle_driving.mp4"
+# --------- Klip driving idle untuk Segment B (KEDIP + SENYUM tipis, terklasifikasi) ---------
+# PENTING: dulu klip driving diambil asal (contoh pertama / terpendek) -> sering
+# klip BICARA / SENYUM konstan, dan setelah di-loop ping-pong ritmenya seragam
+# -> avatar Segmen B jadi komat-kamit / senyum terus / mata melirik kaku.
+# Sekarang kita KLASIFIKASI contoh driving lalu bikin DUA klip pendek:
+#   - idle_blink.mp4 : contoh yang gerak MATA dominan & mulut minim (kedip).
+#   - idle_smile.mp4 : contoh dengan gerak mulut ADA tapi tidak berosilasi
+#                      (bukan bicara) -> senyum tipis. Dilewati bila tak aman.
+# Server lalu menyusun timeline NON-periodik: netral + event pada waktu ACAK.
+# Selalu regenerate (rm -f) supaya klip lama tergantikan.
+echo "==> Generate idle driving (klasifikasi kedip/senyum, low-motion)"
+rm -f "$ASSETS/idle_driving.mp4" "$ASSETS/idle_blink.mp4" "$ASSETS/idle_smile.mp4"
 python3 - <<'PYEOF'
 import os, glob, subprocess
 LP = "/content/LivePortrait"
 ASSETS = "/content/assets"
 os.makedirs(ASSETS, exist_ok=True)
-out = os.path.join(ASSETS, "idle_driving.mp4")
-tmp = "/tmp/idle_src.mp4"
 
-# 1) Kumpulkan kandidat driving example bawaan LivePortrait.
 cands = sorted(glob.glob(os.path.join(LP, "assets/examples/driving", "*.mp4")))
 if not cands:
     cands = sorted(
@@ -211,7 +210,7 @@ if not cands:
         if "driving" in p.lower()
     )
 
-def dur(p):
+def _dur(p):
     try:
         r = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -221,24 +220,92 @@ def dur(p):
     except Exception:
         return 0.0
 
-if not cands:
-    print("[idle] WARN: tak ada driving sample; idle -> static/SadTalker fallback")
+def _ff(args):
+    subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+
+def _make(src, start, dur, out, slow=1.5):
+    tmp = "/tmp/_cut.mp4"
+    _ff(["ffmpeg", "-y", "-ss", "%.2f" % start, "-i", src, "-t", "%.2f" % dur,
+         "-an", "-vf", "fps=25", "-c:v", "libx264", "-pix_fmt", "yuv420p", tmp])
+    _ff(["ffmpeg", "-y", "-i", tmp, "-vf", "setpts=%.2f*PTS,fps=25" % slow,
+         "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", out])
+    return os.path.exists(out) and os.path.getsize(out) > 1000
+
+def _fallback_blink():
+    # Tak bisa analisis -> pakai heuristik lama: klip terpendek, pelan.
+    if not cands:
+        print("[idle] WARN: tak ada driving sample; idle -> static/SadTalker fallback")
+        return
+    src = min(cands, key=lambda p: (_dur(p) or 999.0))
+    ok = _make(src, 0.0, 1.4, os.path.join(ASSETS, "idle_blink.mp4"), 1.6)
+    if ok:
+        _ff(["ffmpeg", "-y", "-i", os.path.join(ASSETS, "idle_blink.mp4"),
+             "-c", "copy", os.path.join(ASSETS, "idle_driving.mp4")])
+    print("[idle] fallback blink <-", os.path.basename(src), "ok=", ok)
+
+try:
+    import numpy as np
+    import cv2
+except Exception as e:
+    print("[idle] numpy/cv2 tak tersedia (", e, ") -> fallback heuristik")
+    _fallback_blink()
+    raise SystemExit(0)
+
+def _analyze(p, maxf=90):
+    cap = cv2.VideoCapture(p)
+    frames = []
+    while len(frames) < maxf:
+        ok, f = cap.read()
+        if not ok:
+            break
+        g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+        g = cv2.resize(g, (128, 128)).astype("float32")
+        frames.append(g)
+    cap.release()
+    if len(frames) < 4:
+        return None
+    fr = np.array(frames)
+    h, w = 128, 128
+    def reg(a, y0, y1, x0, x1):
+        return a[:, int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]
+    def mot(a):
+        d = np.abs(np.diff(a, axis=0))
+        return d.reshape(d.shape[0], -1).mean(axis=1)
+    eye = mot(reg(fr, 0.30, 0.52, 0.20, 0.80))
+    mouth = mot(reg(fr, 0.60, 0.85, 0.28, 0.72))
+    thr = mouth.mean() + mouth.std() + 1e-6
+    peaks = int(((mouth[1:-1] > thr) & (mouth[1:-1] >= mouth[:-2]) & (mouth[1:-1] >= mouth[2:])).sum())
+    return dict(path=p, eye=float(eye.mean()), mouth=float(mouth.mean()),
+                mouthmax=float(mouth.max()), peaks=peaks,
+                eye_argmax=int(eye.argmax()), nframes=len(frames))
+
+info = [a for a in (_analyze(p) for p in cands) if a]
+for a in info:
+    print("[drv]", os.path.basename(a["path"]),
+          "eye=%.3f mouth=%.3f peaks=%d" % (a["eye"], a["mouth"], a["peaks"]))
+
+if not info:
+    print("[idle] analisis kosong -> fallback heuristik")
+    _fallback_blink()
+    raise SystemExit(0)
+
+# BLINK: rasio mata:mulut tertinggi (mata dominan, mulut minim).
+blink = max(info, key=lambda a: a["eye"] / (a["mouth"] + 0.05))
+bstart = max(0.0, blink["eye_argmax"] / 25.0 - 0.15)
+ok_b = _make(blink["path"], bstart, 0.8, os.path.join(ASSETS, "idle_blink.mp4"), 1.5)
+print("[drv] BLINK <-", os.path.basename(blink["path"]), "ok=", ok_b)
+if ok_b:
+    _ff(["ffmpeg", "-y", "-i", os.path.join(ASSETS, "idle_blink.mp4"),
+         "-c", "copy", os.path.join(ASSETS, "idle_driving.mp4")])
+
+# SMILE: ada gerak mulut TAPI peaks sedikit (bukan bicara), bukan si blink.
+sm = [a for a in info if a["peaks"] <= 3 and a["mouth"] > 0.05 and a["path"] != blink["path"]]
+if sm:
+    smile = max(sm, key=lambda a: a["mouthmax"])
+    ok_s = _make(smile["path"], 0.0, 0.9, os.path.join(ASSETS, "idle_smile.mp4"), 1.5)
+    print("[drv] SMILE <-", os.path.basename(smile["path"]), "ok=", ok_s)
 else:
-    # 2) Pilih klip TERPENDEK (cenderung paling kalem / gerak paling sedikit).
-    src = min(cands, key=lambda p: (dur(p) or 999.0))
-    print("[idle] sumber driving:", src, "dur=%.2fs" % dur(src))
-    # 3) Ambil ~1.4 dtk pertama @25fps, tanpa audio.
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", src, "-t", "1.4", "-an", "-vf", "fps=25",
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", tmp],
-        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-    # 4) PERLAMBAT ~1.6x (setpts) supaya kedip jadi halus & tidak fast-motion.
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", tmp, "-vf", "setpts=1.6*PTS,fps=25", "-an",
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", out],
-        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-    ok = os.path.exists(out) and os.path.getsize(out) > 1000
-    print("[idle] idle_driving.mp4:", ("OK %d b, dur=%.2fs" % (os.path.getsize(out), dur(out))) if ok else "GAGAL dibuat")
+    print("[drv] SMILE: tak ada kandidat aman -> Segmen B jadi kedip-only")
 PYEOF
 
 # --------- SELF-TEST: import + render nyata (diagnosa lengkap) ---------

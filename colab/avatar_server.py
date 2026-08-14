@@ -266,52 +266,171 @@ def _render_sadtalker(image: Path, audio: Path, out_dir: Path, fps: int) -> Path
     raise RuntimeError('SadTalker gagal render')
 
 
-def _render_liveportrait_idle(image: Path, out_dir: Path, seconds: float, fps: int) -> Path:
-    """Idle Segmen B: retarget klip driving KEDIP HALUS ke wajah user.
+def _lp_render_unit(image: Path, driving: Path, out_dir: Path, normalize_lip: bool) -> Path:
+    """Render satu 'unit' ekspresif pendek: wajah user mengikuti klip driving.
 
-    Dua kunci supaya TENANG (bukan komat-kamit / alis liar seperti keluhan):
-      1) Mulut dipaksa TETAP TERTUTUP -> matikan transfer gerak bibir
-         (flag lip normalize/zero) sehingga apa pun mulut di klip driving
-         tidak ikut terbawa.
-      2) Intensitas gerak diredam (driving_multiplier rendah) sehingga hanya
-         kedip halus + micro-move, bukan gerak besar.
-    Semua flag dipilih dinamis dari `inference.py --help` agar cocok dengan
-    versi LivePortrait yang terpasang (tidak menebak nama flag).
+    - normalize_lip=True  -> mulut DIKUNCI tertutup (dipakai untuk unit KEDIP).
+    - normalize_lip=False -> biarkan gerak bibir tipis (dipakai untuk SENYUM).
+    driving_multiplier rendah (0.35) supaya gerak halus, tidak agresif.
+    Flag dipilih dinamis dari `inference.py --help` (tidak menebak nama flag).
     """
-    if not IDLE_DRIVING or not Path(IDLE_DRIVING).exists():
-        raise RuntimeError('no IDLE_DRIVING clip configured')
     out_dir.mkdir(parents=True, exist_ok=True)
     _free_cuda()
     help_txt = _lp_help_text()
     cmd = [
         sys.executable, 'inference.py',
         '-s', str(image),
-        '-d', str(IDLE_DRIVING),
+        '-d', str(driving),
         '-o', str(out_dir),
     ]
-    # (1) Jaga mulut tertutup: pilih SATU flag yang tersedia.
-    if '--flag_normalize_lip' in help_txt:
-        cmd.append('--flag_normalize_lip')
-    elif '--flag_lip_zero' in help_txt:
-        cmd.append('--flag_lip_zero')
-    # (2) Redam amplitudo gerak biar halus.
+    if normalize_lip:
+        if '--flag_normalize_lip' in help_txt:
+            cmd.append('--flag_normalize_lip')
+        elif '--flag_lip_zero' in help_txt:
+            cmd.append('--flag_lip_zero')
     if '--driving_multiplier' in help_txt:
-        cmd += ['--driving_multiplier', '0.55']
-    # (3) Stitching bikin hasil menyatu rapi dengan bingkai wajah.
+        cmd += ['--driving_multiplier', '0.35']
     if '--flag_stitching' in help_txt:
         cmd.append('--flag_stitching')
     _run(cmd, cwd=LIVEPORTRAIT_DIR, timeout=900)
-    # LivePortrait sering menulis DUA file: hasil animasi + versi "_concat"
-    # (source|driving berdampingan). Ambil yang BUKAN concat.
     vids = [p for p in out_dir.rglob('*.mp4') if 'concat' not in p.name.lower()]
     if not vids:
         vids = list(out_dir.rglob('*.mp4'))
     if not vids:
         raise RuntimeError('LivePortrait produced no mp4')
-    base = max(vids, key=lambda p: p.stat().st_mtime)
-    # Loop ping-pong hingga sepanjang durasi Segmen B (bukan freeze pendek).
-    looped = _loop_to_duration(base, out_dir / 'idle_full.mp4', seconds, fps)
-    return looped
+    return max(vids, key=lambda p: p.stat().st_mtime)
+
+
+def _vid_dims(path: Path):
+    try:
+        r = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x', str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60,
+        )
+        w, h = r.stdout.decode('utf-8', 'ignore').strip().split('x')
+        return int(w), int(h)
+    except Exception:
+        return 256, 256
+
+
+def _build_random_idle(units, out_dir: Path, out: Path, seconds: float, fps: int) -> Path:
+    """Rangkai timeline idle NON-periodik supaya terasa natural seperti manusia.
+
+    Prinsip: sebagian besar waktu wajah NETRAL/diam. Event (kedip / senyum tipis)
+    disisipkan pada waktu ACAK dengan jeda acak, sehingga:
+      - tidak ada senyum terus-menerus (senyum hanya sesekali),
+      - ritme tidak seragam (bukan loop ping-pong yang berulang identik),
+      - kedip terjadi sesekali, bukan mata melirik kaku berirama.
+    """
+    import random
+    import time as _time
+    random.seed((int(_time.time() * 1000) ^ os.getpid()) & 0x7fffffff)
+    seconds = max(1.5, float(seconds))
+    tmpd = out_dir / 'idle_parts'
+    tmpd.mkdir(parents=True, exist_ok=True)
+
+    first_unit = next(iter(units.values()))
+    W, H = _vid_dims(first_unit)
+
+    # Normalisasi tiap unit (fps + ukuran + codec seragam) agar bisa di-concat.
+    norm, udur = {}, {}
+    for kind, u in units.items():
+        pu = tmpd / ('u_' + kind + '.mp4')
+        _run(['ffmpeg', '-y', '-i', str(u), '-r', str(fps),
+              '-vf', 'fps=' + str(fps) + ',scale=' + str(W) + ':' + str(H),
+              '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(pu)])
+        norm[kind] = pu
+        udur[kind] = max(0.2, _probe_duration(pu))
+
+    # Frame NETRAL = frame pertama unit (pose asli user, tenang).
+    neutral_png = tmpd / 'neutral.png'
+    _run(['ffmpeg', '-y', '-i', str(first_unit), '-frames:v', '1',
+          '-vf', 'scale=' + str(W) + ':' + str(H), str(neutral_png)])
+
+    parts = []
+    nidx = [0]
+
+    def add_neutral(dur):
+        dur = max(0.4, float(dur))
+        p = tmpd / ('n' + str(nidx[0]) + '.mp4')
+        nidx[0] += 1
+        _run(['ffmpeg', '-y', '-loop', '1', '-t', '%.2f' % dur, '-i', str(neutral_png),
+              '-r', str(fps),
+              '-vf', 'fps=' + str(fps) + ',scale=' + str(W) + ':' + str(H),
+              '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(p)])
+        parts.append(p)
+        return dur
+
+    t = 0.0
+    # Jeda tenang di awal (durasi acak).
+    t += add_neutral(random.uniform(1.2, 2.6))
+    have_smile = 'smile' in norm
+    while t < seconds - 0.3:
+        # Mayoritas event = kedip; sesekali (~1 dari 4) = senyum tipis.
+        if have_smile and random.random() < 0.26:
+            kind = 'smile'
+        else:
+            kind = 'blink' if 'blink' in norm else next(iter(norm.keys()))
+        parts.append(norm[kind])
+        t += udur[kind]
+        if t >= seconds - 0.3:
+            break
+        # Jeda tenang ACAK antar event -> ritme tidak seragam.
+        gap = random.uniform(2.0, 5.5) if kind == 'blink' else random.uniform(3.0, 6.5)
+        t += add_neutral(gap)
+
+    listf = tmpd / 'list.txt'
+    listf.write_text(''.join("file '" + str(p) + "'\n" for p in parts))
+    _run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', str(listf),
+          '-t', '%.2f' % seconds, '-r', str(fps),
+          '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', str(out)])
+    return out
+
+
+def _render_liveportrait_idle(image: Path, out_dir: Path, seconds: float, fps: int) -> Path:
+    """Idle Segmen B natural: kedip SESEKALI + senyum tipis SESEKALI, ritme ACAK.
+
+    Alur:
+      1) Render 1 unit KEDIP (mulut dikunci tertutup) dari klip driving 'idle_blink'.
+      2) (opsional) Render 1 unit SENYUM tipis dari 'idle_smile' bila tersedia.
+      3) Susun timeline non-periodik: basis wajah netral + sisipkan unit pada
+         waktu acak (lihat _build_random_idle).
+    Sumber driving diambil dari folder yang sama dengan IDLE_DRIVING
+    (idle_blink.mp4 / idle_smile.mp4), sehingga tidak perlu env var baru.
+    """
+    if not IDLE_DRIVING or not Path(IDLE_DRIVING).exists():
+        raise RuntimeError('no IDLE_DRIVING clip configured')
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    assets_dir = Path(IDLE_DRIVING).parent
+    blink_src = assets_dir / 'idle_blink.mp4'
+    smile_src = assets_dir / 'idle_smile.mp4'
+    if not blink_src.exists():
+        blink_src = Path(IDLE_DRIVING)
+
+    units = {}
+    # Unit kedip: mulut DIKUNCI tertutup (normalize lip).
+    try:
+        units['blink'] = _lp_render_unit(image, blink_src, out_dir / 'u_blink', True)
+    except Exception as e:
+        _log('blink unit gagal:', e)
+    # Unit senyum: biarkan senyum tipis (JANGAN normalize lip); hanya bila ada sumbernya.
+    if smile_src.exists():
+        try:
+            units['smile'] = _lp_render_unit(image, smile_src, out_dir / 'u_smile', False)
+        except Exception as e:
+            _log('smile unit gagal:', e)
+
+    if not units:
+        raise RuntimeError('LivePortrait produced no idle unit')
+
+    try:
+        return _build_random_idle(units, out_dir, out_dir / 'idle_full.mp4', seconds, fps)
+    except Exception as e:
+        _log('random idle assembly gagal, fallback ping-pong:', e)
+        base = units.get('blink') or next(iter(units.values()))
+        return _loop_to_duration(base, out_dir / 'idle_full.mp4', seconds, fps)
 
 
 def _do_render(image_b64, audio_b64, mode, duration, fps) -> Path:
