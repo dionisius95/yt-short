@@ -193,6 +193,29 @@ def _liveportrait_available() -> bool:
     return LIVEPORTRAIT_DIR.exists() and (LIVEPORTRAIT_DIR / 'inference.py').exists()
 
 
+_LP_HELP_CACHE = None
+
+
+def _lp_help_text() -> str:
+    """Ambil (sekali) teks `inference.py --help` LivePortrait supaya kita bisa
+    memilih flag yang BENAR-BENAR ada di versi terpasang (hindari menebak nama
+    flag yang beda antar versi -> error)."""
+    global _LP_HELP_CACHE
+    if _LP_HELP_CACHE is not None:
+        return _LP_HELP_CACHE
+    try:
+        r = subprocess.run(
+            [sys.executable, 'inference.py', '--help'],
+            cwd=str(LIVEPORTRAIT_DIR),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120,
+        )
+        _LP_HELP_CACHE = r.stdout.decode('utf-8', 'ignore')
+    except Exception as e:
+        _log('LivePortrait --help gagal:', e)
+        _LP_HELP_CACHE = ''
+    return _LP_HELP_CACHE
+
+
 def _make_silent_wav(dst: Path, seconds: float, fps: int):
     """SadTalker needs an audio track; synthesize silence for idle fallback."""
     seconds = max(0.5, float(seconds))
@@ -244,22 +267,49 @@ def _render_sadtalker(image: Path, audio: Path, out_dir: Path, fps: int) -> Path
 
 
 def _render_liveportrait_idle(image: Path, out_dir: Path, seconds: float, fps: int) -> Path:
+    """Idle Segmen B: retarget klip driving KEDIP HALUS ke wajah user.
+
+    Dua kunci supaya TENANG (bukan komat-kamit / alis liar seperti keluhan):
+      1) Mulut dipaksa TETAP TERTUTUP -> matikan transfer gerak bibir
+         (flag lip normalize/zero) sehingga apa pun mulut di klip driving
+         tidak ikut terbawa.
+      2) Intensitas gerak diredam (driving_multiplier rendah) sehingga hanya
+         kedip halus + micro-move, bukan gerak besar.
+    Semua flag dipilih dinamis dari `inference.py --help` agar cocok dengan
+    versi LivePortrait yang terpasang (tidak menebak nama flag).
+    """
     if not IDLE_DRIVING or not Path(IDLE_DRIVING).exists():
         raise RuntimeError('no IDLE_DRIVING clip configured')
     out_dir.mkdir(parents=True, exist_ok=True)
     _free_cuda()
-    # Retarget SEKALI dari klip driving pendek -> idle natural (kedip/senyum/gerak).
+    help_txt = _lp_help_text()
     cmd = [
         sys.executable, 'inference.py',
         '-s', str(image),
         '-d', str(IDLE_DRIVING),
         '-o', str(out_dir),
     ]
+    # (1) Jaga mulut tertutup: pilih SATU flag yang tersedia.
+    if '--flag_normalize_lip' in help_txt:
+        cmd.append('--flag_normalize_lip')
+    elif '--flag_lip_zero' in help_txt:
+        cmd.append('--flag_lip_zero')
+    # (2) Redam amplitudo gerak biar halus.
+    if '--driving_multiplier' in help_txt:
+        cmd += ['--driving_multiplier', '0.55']
+    # (3) Stitching bikin hasil menyatu rapi dengan bingkai wajah.
+    if '--flag_stitching' in help_txt:
+        cmd.append('--flag_stitching')
     _run(cmd, cwd=LIVEPORTRAIT_DIR, timeout=900)
-    base = _newest_mp4(out_dir)
-    if not base:
+    # LivePortrait sering menulis DUA file: hasil animasi + versi "_concat"
+    # (source|driving berdampingan). Ambil yang BUKAN concat.
+    vids = [p for p in out_dir.rglob('*.mp4') if 'concat' not in p.name.lower()]
+    if not vids:
+        vids = list(out_dir.rglob('*.mp4'))
+    if not vids:
         raise RuntimeError('LivePortrait produced no mp4')
-    # Loop ping-pong hingga sepanjang durasi Segmen B (bukan freeze 3 detik).
+    base = max(vids, key=lambda p: p.stat().st_mtime)
+    # Loop ping-pong hingga sepanjang durasi Segmen B (bukan freeze pendek).
     looped = _loop_to_duration(base, out_dir / 'idle_full.mp4', seconds, fps)
     return looped
 

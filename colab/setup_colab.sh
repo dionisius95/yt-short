@@ -185,16 +185,61 @@ if [ ! -d "$WORK/LivePortrait" ]; then
   huggingface-cli download KwaiVGI/LivePortrait --local-dir "$WORK/LivePortrait/pretrained_weights" --exclude "*.git*" >/dev/null 2>&1 || true
 fi
 
-# --------- Idle driving video untuk Segment B ---------
-if [ ! -f "$ASSETS/idle_driving.mp4" ]; then
-  echo "==> Siapkan idle driving video"
-  SRC=$(find "$WORK/LivePortrait" -name '*.mp4' -path '*driving*' 2>/dev/null | head -n1)
-  if [ -n "$SRC" ]; then
-    ffmpeg -y -i "$SRC" -t 3 -vf fps=25 -an "$ASSETS/idle_driving.mp4" >/dev/null 2>&1 || true
-  else
-    echo "WARN: tidak menemukan driving sample; idle akan fallback ke SadTalker still."
-  fi
-fi
+# --------- Idle driving video untuk Segment B (KEDIP HALUS, mulut tertutup) ---------
+# PENTING: dulu di sini asal ambil "driving example pertama" (head -n1) yang
+# ternyata klip orang BICARA -> LivePortrait meniru gerak mulut & alisnya ->
+# avatar Segmen B jadi komat-kamit / alis liar. Sekarang kita GENERATE klip
+# driving kedip halus sendiri: pilih contoh driving paling KALEM (durasi
+# terpendek), pangkas pendek, dan PERLAMBAT supaya geraknya minimal & lembut.
+# Mulut dijaga tetap tertutup di sisi render (flag lip-normalize di server).
+# Selalu regenerate (rm -f) supaya klip lama yang "bicara" tergantikan.
+echo "==> Generate idle driving (kedip halus, low-motion)"
+rm -f "$ASSETS/idle_driving.mp4"
+python3 - <<'PYEOF'
+import os, glob, subprocess
+LP = "/content/LivePortrait"
+ASSETS = "/content/assets"
+os.makedirs(ASSETS, exist_ok=True)
+out = os.path.join(ASSETS, "idle_driving.mp4")
+tmp = "/tmp/idle_src.mp4"
+
+# 1) Kumpulkan kandidat driving example bawaan LivePortrait.
+cands = sorted(glob.glob(os.path.join(LP, "assets/examples/driving", "*.mp4")))
+if not cands:
+    cands = sorted(
+        p for p in glob.glob(os.path.join(LP, "**", "*.mp4"), recursive=True)
+        if "driving" in p.lower()
+    )
+
+def dur(p):
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", p],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        return float((r.stdout.decode("utf-8", "ignore") or "0").strip() or 0)
+    except Exception:
+        return 0.0
+
+if not cands:
+    print("[idle] WARN: tak ada driving sample; idle -> static/SadTalker fallback")
+else:
+    # 2) Pilih klip TERPENDEK (cenderung paling kalem / gerak paling sedikit).
+    src = min(cands, key=lambda p: (dur(p) or 999.0))
+    print("[idle] sumber driving:", src, "dur=%.2fs" % dur(src))
+    # 3) Ambil ~1.4 dtk pertama @25fps, tanpa audio.
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", src, "-t", "1.4", "-an", "-vf", "fps=25",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", tmp],
+        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    # 4) PERLAMBAT ~1.6x (setpts) supaya kedip jadi halus & tidak fast-motion.
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", tmp, "-vf", "setpts=1.6*PTS,fps=25", "-an",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", out],
+        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    ok = os.path.exists(out) and os.path.getsize(out) > 1000
+    print("[idle] idle_driving.mp4:", ("OK %d b, dur=%.2fs" % (os.path.getsize(out), dur(out))) if ok else "GAGAL dibuat")
+PYEOF
 
 # --------- SELF-TEST: import + render nyata (diagnosa lengkap) ---------
 echo "==> Self-test 1/2: import SadTalker di stack modern ..."
