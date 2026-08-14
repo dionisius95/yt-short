@@ -16,6 +16,12 @@ export interface AvatarGenerateParams {
 	durationSec?: number;
 	/** Output fps (defaults to 25). */
 	fps?: number;
+	/**
+	 * When true, ask the engine to matte the photo background away so only the
+	 * person remains (returns a VP9/alpha .webm). Additive: default false keeps
+	 * the opaque mp4 and current behavior.
+	 */
+	removeBackground?: boolean;
 }
 
 // Overall budget for one segment, including the background render + polling.
@@ -43,16 +49,21 @@ type PollResult = { pending?: boolean; mp4?: Buffer; error?: string };
  * `avatar.enabled` and treat any thrown error as "skip avatar, render normally".
  *
  * Transport is async: POST /avatar enqueues a render and returns { job_id };
- * GET /avatar/result/<job_id> returns 202 while working, then the mp4. This
+ * GET /avatar/result/<job_id> returns 202 while working, then the video. This
  * keeps every request short so Cloudflare quick tunnels never 524 mid-render.
  * Transient connection drops and gateway (502/503/504) hiccups are retried
  * instead of being treated as failures.
+ *
+ * The finished clip is normally an mp4, but when background removal is enabled
+ * the engine returns a VP9/alpha .webm instead; both containers are accepted
+ * and written verbatim to outputPath (ffmpeg reads by content, not extension).
  */
 export class AvatarGenerator {
 	async generate(params: AvatarGenerateParams): Promise<string> {
 		const { imagePath, audioPath, mode, outputPath } = params;
 		const fps = params.fps ?? 25;
 		const duration = params.durationSec ?? 4;
+		const removeBackground = params.removeBackground ?? false;
 
 		const imageB64 = fs.readFileSync(imagePath).toString('base64');
 		const audioB64 =
@@ -69,6 +80,7 @@ export class AvatarGenerator {
 			mode,
 			duration,
 			fps,
+			remove_bg: removeBackground,
 		});
 
 		const deadline = Date.now() + AVATAR_TIMEOUT_MS;
@@ -77,7 +89,7 @@ export class AvatarGenerator {
 		//    tunnel never holds a single request open past its ~100s cap.
 		const submit = await this.submitJob(endpoint, body, deadline);
 		if (submit.mp4) {
-			// Backward-compat: an older server streamed the mp4 straight back.
+			// Backward-compat: an older server streamed the clip straight back.
 			fs.writeFileSync(outputPath, submit.mp4);
 			return outputPath;
 		}
@@ -87,7 +99,7 @@ export class AvatarGenerator {
 			);
 		}
 
-		// 2) Poll for the finished mp4 until done / error / deadline. Transient
+		// 2) Poll for the finished clip until done / error / deadline. Transient
 		//    tunnel drops and gateway hiccups are swallowed by pollResult and
 		//    retried on the next tick; the background job keeps running.
 		const resultUrl = `${base}/avatar/result/${submit.jobId}`;
@@ -131,7 +143,7 @@ export class AvatarGenerator {
 
 				if (res.ok) {
 					const buf = Buffer.from(await res.arrayBuffer());
-					if (AvatarGenerator.isMp4(buf)) return { mp4: buf };
+					if (AvatarGenerator.isVideo(buf)) return { mp4: buf };
 					const text = buf.toString('utf-8');
 					const jobId = AvatarGenerator.parseJobId(text);
 					if (jobId) return { jobId, raw: text };
@@ -166,8 +178,8 @@ export class AvatarGenerator {
 			if (res.status === 202) return { pending: true };
 			if (res.ok) {
 				const buf = Buffer.from(await res.arrayBuffer());
-				if (AvatarGenerator.isMp4(buf)) return { mp4: buf };
-				// A 200 that is not a full mp4 means the body dropped mid-transfer;
+				if (AvatarGenerator.isVideo(buf)) return { mp4: buf };
+				// A 200 that is not a full video means the body dropped mid-transfer;
 				// the job is still done, so retry on the next tick.
 				return { pending: true };
 			}
@@ -287,5 +299,21 @@ export class AvatarGenerator {
 	private static isMp4(buf: Buffer): boolean {
 		if (!buf || buf.length < 12) return false;
 		return buf.toString('ascii', 4, 8) === 'ftyp';
+	}
+
+	/** WebM/Matroska streams start with the EBML magic 0x1A45DFA3. */
+	private static isWebm(buf: Buffer): boolean {
+		if (!buf || buf.length < 4) return false;
+		return (
+			buf[0] === 0x1a &&
+			buf[1] === 0x45 &&
+			buf[2] === 0xdf &&
+			buf[3] === 0xa3
+		);
+	}
+
+	/** Accept either an mp4 (opaque) or a webm (alpha, background removed). */
+	private static isVideo(buf: Buffer): boolean {
+		return AvatarGenerator.isMp4(buf) || AvatarGenerator.isWebm(buf);
 	}
 }

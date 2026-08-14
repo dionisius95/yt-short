@@ -46,6 +46,11 @@ export class AvatarCompositor {
 		const avatarW = Math.max(2, Math.round(canvasW * avatar.scale));
 		const r = Math.round(avatarW / 2);
 		const rr = r * r;
+		// When background removal is on, the clip is already a person cutout on a
+		// transparent (alpha) background (VP9/webm). We must PRESERVE that alpha
+		// instead of forcing it opaque, so only the person composites onto the
+		// video. Off => current behavior (opaque box / hard circle mask).
+		const rmbg = !!avatar.removeBackground;
 
 		// Build inputs: main video first, then each avatar clip time-shifted so it
 		// starts at its segment boundary on the main timeline.
@@ -74,12 +79,21 @@ export class AvatarCompositor {
 				`tpad=stop_mode=clone:stop_duration=${winLen.toFixed(3)},` +
 				`trim=end=${seg.endSec.toFixed(3)},`;
 			if (avatar.shape === 'circle') {
+				// Circle mask. With bg removal, keep the source alpha inside the circle
+				// (person cutout); without it, fill the circle opaque as before.
+				const alphaExpr = rmbg
+					? `a='if(gt((X-${r})*(X-${r})+(Y-${r})*(Y-${r})\\,${rr})\\,0\\,alpha(X\\,Y))'`
+					: `a='if(gt((X-${r})*(X-${r})+(Y-${r})*(Y-${r})\\,${rr})\\,0\\,255)'`;
 				filters.push(
 					`[${idx}:v]${hold}scale=${avatarW}:${avatarW}:force_original_aspect_ratio=increase,` +
 						`crop=${avatarW}:${avatarW},format=rgba,` +
 						`geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':` +
-						`a='if(gt((X-${r})*(X-${r})+(Y-${r})*(Y-${r})\\,${rr})\\,0\\,255)'[${av}]`,
+						`${alphaExpr}[${av}]`,
 				);
+			} else if (rmbg) {
+				// Rectangular framing but keep the transparent background from the
+				// engine so only the person shows (no opaque box).
+				filters.push(`[${idx}:v]${hold}scale=${avatarW}:-1,format=rgba[${av}]`);
 			} else {
 				filters.push(`[${idx}:v]${hold}scale=${avatarW}:-1[${av}]`);
 			}
