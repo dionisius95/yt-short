@@ -63,10 +63,16 @@ export class AvatarCompositor {
 			// segment window (talk clip ~= TTS duration, but the segment gets a
 			// little padding + xfade overlap). Without padding, the overlay simply
 			// vanishes as soon as the clip ends, which looks like an amateur cut.
-			// tpad clones the final frame so the avatar stays on-screen through the
-			// whole segment; the `enable` gate below still removes it exactly at the
-			// segment boundary. The clone is bounded by the main video length.
-			const hold = 'tpad=stop_mode=clone:stop_duration=3600,';
+			// tpad clones the final frame to fill the window, then trim=end caps the
+			// avatar input EXACTLY at the segment boundary (its input timestamps are
+			// already shifted by -itsoffset startSec). Capping is essential: an
+			// unbounded clone would make this input the longest one and stretch the
+			// whole output to that length. The `enable` gate still hides it outside
+			// the window.
+			const winLen = Math.max(0, seg.endSec - seg.startSec);
+			const hold =
+				`tpad=stop_mode=clone:stop_duration=${winLen.toFixed(3)},` +
+				`trim=end=${seg.endSec.toFixed(3)},`;
 			if (avatar.shape === 'circle') {
 				filters.push(
 					`[${idx}:v]${hold}scale=${avatarW}:${avatarW}:force_original_aspect_ratio=increase,` +
