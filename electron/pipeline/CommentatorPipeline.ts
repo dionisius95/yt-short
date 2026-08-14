@@ -264,6 +264,7 @@ export class CommentatorPipeline {
           mode: 'talk',
           baseUrl,
           outputPath: path.join(dir, 'avatar_segA.mp4'),
+          removeBackground: req.avatar.removeBackground,
         });
         avatarSegASec = (actualTtsDurMs || ttsDurationMs) / 1000;
 
@@ -275,6 +276,7 @@ export class CommentatorPipeline {
             mode: 'talk',
             baseUrl,
             outputPath: path.join(dir, 'avatar_segC.mp4'),
+            removeBackground: req.avatar.removeBackground,
           });
           avatarSegCSec = (takeawayDurationMs || 0) / 1000;
         }
@@ -287,6 +289,7 @@ export class CommentatorPipeline {
           baseUrl,
           outputPath: path.join(dir, 'avatar_segB.mp4'),
           durationSec: Math.max(1, Math.round(durationMs / 1000)),
+          removeBackground: req.avatar.removeBackground,
         });
         avatarSegBSec = durationMs / 1000;
 
