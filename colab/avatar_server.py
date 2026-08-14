@@ -435,7 +435,97 @@ def _render_liveportrait_idle(image: Path, out_dir: Path, seconds: float, fps: i
         return _loop_to_duration(base, out_dir / 'idle_full.mp4', seconds, fps)
 
 
-def _do_render(image_b64, audio_b64, mode, duration, fps) -> Path:
+# --- Background removal (opsional) --------------------------------------------
+# Saat toggle "Hapus Background" aktif, klip avatar di-matte per-frame dengan
+# rembg (model u2net_human_seg) sehingga hanya orangnya tersisa, lalu di-encode
+# ke VP9/webm ber-alpha (yuva420p). Kompositor desktop mempertahankan alpha ini.
+# Fail-safe: bila rembg/onnxruntime tak tersedia atau gagal, kembalikan klip
+# aslinya (mp4 opaque) sehingga render tetap jalan tanpa error.
+_REMBG_SESSION = [None]
+
+
+def _get_rembg_session():
+    if _REMBG_SESSION[0] is not None:
+        return _REMBG_SESSION[0] or None
+    try:
+        from rembg import new_session
+        model = os.environ.get('REMBG_MODEL', 'u2net_human_seg')
+        _REMBG_SESSION[0] = new_session(model)
+        _log('rembg session siap (model=' + model + ')')
+    except Exception as e:
+        _log('rembg tak tersedia (', e, ') -> lewati hapus background')
+        _REMBG_SESSION[0] = False
+    return _REMBG_SESSION[0] or None
+
+
+def remove_background_video(in_path, out_dir, fps) -> Path:
+    """Matte orang dari tiap frame -> webm VP9 ber-alpha (yuva420p).
+
+    Fail-safe: kalau rembg/onnxruntime/cv2 tak tersedia atau ada error, kembalikan
+    `in_path` apa adanya (mp4 opaque) supaya pipeline tidak gagal.
+    """
+    in_path = Path(in_path)
+    out_dir = Path(out_dir)
+    try:
+        from rembg import remove
+    except Exception as e:
+        _log('rembg import gagal, background tidak dihapus:', e)
+        return in_path
+    session = _get_rembg_session()
+    if session is None:
+        return in_path
+    try:
+        import cv2
+        from PIL import Image as _PILImage
+    except Exception as e:
+        _log('cv2/PIL tak tersedia untuk matting:', e)
+        return in_path
+
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        frames_dir = out_dir / 'matte_frames'
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        cap = cv2.VideoCapture(str(in_path))
+        idx = 0
+        try:
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil = _PILImage.fromarray(rgb)
+                cut = remove(pil, session=session)  # RGBA person cutout
+                if cut.mode != 'RGBA':
+                    cut = cut.convert('RGBA')
+                cut.save(frames_dir / ('f_%06d.png' % idx))
+                idx += 1
+        finally:
+            cap.release()
+        if idx == 0:
+            _log('matting: tak ada frame terbaca -> kembalikan asli')
+            return in_path
+        out_webm = out_dir / 'avatar_rgba.webm'
+        # PNG RGBA sequence -> VP9 dengan alpha. yuva420p wajib agar transparansi
+        # ikut ter-encode (mp4/H.264 tidak punya alpha, makanya pakai webm).
+        _run([
+            'ffmpeg', '-y', '-framerate', str(fps),
+            '-i', str(frames_dir / 'f_%06d.png'),
+            '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p',
+            '-b:v', '0', '-crf', '24', '-an',
+            str(out_webm),
+        ], timeout=1200)
+        if not out_webm.exists() or out_webm.stat().st_size < 1000:
+            _log('matting: encode webm gagal -> kembalikan asli')
+            return in_path
+        _log('matting: background dihapus ->', out_webm)
+        return out_webm
+    except Exception as e:
+        traceback.print_exc()
+        _log('matting gagal (', e, ') -> kembalikan asli')
+        return in_path
+
+
+def _do_render(image_b64, audio_b64, mode, duration, fps, remove_bg=False) -> Path:
     """Blocking render. Dipanggil dari worker thread (bukan dari request handler)."""
     job = Path(tempfile.mkdtemp(prefix='job_', dir=str(WORKDIR)))
     img_path = _prep_image(base64.b64decode(image_b64), job / 'src.png')
@@ -459,6 +549,14 @@ def _do_render(image_b64, audio_b64, mode, duration, fps) -> Path:
         aud_path = job / 'drive.wav'
         aud_path.write_bytes(base64.b64decode(audio_b64))
         vid = _render_sadtalker(img_path, aud_path, out_dir, fps)
+
+    # Opsional: hapus background -> webm ber-alpha (orangnya saja). Fail-safe:
+    # kalau gagal, remove_background_video mengembalikan `vid` mp4 asli.
+    if remove_bg:
+        matted = remove_background_video(vid, job / 'matte', fps)
+        if matted and str(matted).lower().endswith('.webm'):
+            return Path(matted)
+        # matting gagal -> lanjut ke normalisasi mp4 opaque di bawah.
 
     # Normalize container/fps so the desktop app always gets a clean mp4.
     final = job / 'avatar.mp4'
@@ -506,6 +604,7 @@ def _handle_avatar():
         mode = (data.get('mode') or 'talk').lower()
         duration = float(data.get('duration') or 4.0)
         fps = int(data.get('fps') or DEFAULT_FPS)
+        remove_bg = bool(data.get('remove_bg'))
 
         if not image_b64:
             return jsonify({'error': 'image_b64 is required'}), 400
@@ -521,11 +620,12 @@ def _handle_avatar():
             'mode': mode,
             'duration': duration,
             'fps': fps,
+            'remove_bg': remove_bg,
         }
         with _JOBS_LOCK:
             _JOBS[job_id] = {'status': 'pending', 'path': None, 'error': None}
         threading.Thread(target=_run_job, args=(job_id, params), daemon=True).start()
-        _log('queued job', job_id, 'mode', mode, 'duration', duration)
+        _log('queued job', job_id, 'mode', mode, 'duration', duration, 'remove_bg', remove_bg)
         return jsonify({'job_id': job_id, 'status': 'pending'}), 202
     except Exception as e:  # pragma: no cover
         traceback.print_exc()
@@ -533,7 +633,7 @@ def _handle_avatar():
 
 
 def _handle_avatar_result(job_id):
-    """Polling hasil job: 202 selama proses, mp4 saat selesai, 5xx saat gagal."""
+    """Polling hasil job: 202 selama proses, video saat selesai, 5xx saat gagal."""
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
         snapshot = dict(job) if job else None
@@ -547,7 +647,9 @@ def _handle_avatar_result(job_id):
     path = snapshot.get('path')
     if not path or not Path(path).exists():
         return jsonify({'status': 'error', 'error': 'result file missing'}), 500
-    return send_file(path, mimetype='video/mp4')
+    # webm saat background dihapus (VP9 alpha), selain itu mp4.
+    mime = 'video/webm' if str(path).lower().endswith('.webm') else 'video/mp4'
+    return send_file(path, mimetype=mime)
 
 
 def _handle_health():

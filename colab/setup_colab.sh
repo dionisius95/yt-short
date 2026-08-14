@@ -18,6 +18,12 @@ pip -q install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors \
     face-alignment kornia pydub librosa numba resampy gfpgan basicsr scikit-image >/dev/null 2>&1 || \
   pip -q install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors face-alignment kornia pydub librosa numba resampy gfpgan basicsr scikit-image || true
 
+echo "==> Hapus-background deps (rembg + onnxruntime GPU, fallback CPU)"
+# rembg + onnxruntime-gpu (u2net_human_seg) untuk toggle "Hapus Background".
+# Model diunduh otomatis saat pertama dipakai. Fallback ke onnxruntime CPU.
+pip -q install rembg onnxruntime-gpu >/dev/null 2>&1 || \
+  pip -q install rembg onnxruntime >/dev/null 2>&1 || true
+
 # --------- SadTalker (mode talk: A & C) ---------
 if [ ! -d "$WORK/SadTalker" ]; then
   echo "==> Clone SadTalker"
