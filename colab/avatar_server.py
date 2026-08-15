@@ -125,13 +125,8 @@ def _prep_image(raw: bytes, dst: Path) -> Path:
 def _run(cmd, cwd=None, timeout=600, env=None):
     _log('run:', ' '.join(str(c) for c in cmd))
     run_env = dict(os.environ)
-    # Kurangi fragmentasi VRAM saat TTS + SadTalker berbagi satu T4.
+    # Kurangi fragmentasi VRAM saat VoxCPM + SadTalker berbagi satu T4.
     run_env.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
-    # Cegah crash fatal python: config_init_hash_seed
-    if 'PYTHONHASHSEED' in run_env:
-        val = str(run_env['PYTHONHASHSEED']).strip()
-        if val != 'random' and not (val.isdigit() and 0 <= int(val) <= 4294967295):
-            run_env.pop('PYTHONHASHSEED', None)
     if env:
         run_env.update(env)
     proc = subprocess.run(

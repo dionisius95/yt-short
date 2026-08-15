@@ -1,6 +1,7 @@
-# Endpoint F5-TTS + Avatar (Colab T4) untuk Commentary
+# Avatar Endpoint (Colab T4) untuk Commentary
 
-Menyediakan route `POST /tts` (voice-clone F5-TTS Flow Matching) dan `POST /avatar` di server Colab yang **sama**. App memanggilnya dengan base URL yang sama seperti `xttsColabUrl`.
+Menyediakan route `POST /avatar` di server Colab yang **sama** dengan VoxCPM/XTTS
+voice-clone. App memanggilnya dengan base URL yang sama seperti `xttsColabUrl`.
 
 ## Isi
 

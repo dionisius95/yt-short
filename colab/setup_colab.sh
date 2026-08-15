@@ -13,7 +13,7 @@ echo "==> System deps"
 apt-get -qq update >/dev/null 2>&1 || true
 apt-get -qq install -y ffmpeg git-lfs >/dev/null 2>&1 || true
 
-echo "==> Python deps (tanpa pin yang bisa merusak numpy/torch F5-TTS/VoxCPM)"
+echo "==> Python deps (tanpa pin yang bisa merusak numpy/torch VoxCPM)"
 pip -q install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors \
     face-alignment kornia pydub librosa numba resampy gfpgan basicsr scikit-image >/dev/null 2>&1 || \
   pip -q install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors face-alignment kornia pydub librosa numba resampy gfpgan basicsr scikit-image || true
