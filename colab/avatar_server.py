@@ -126,6 +126,16 @@ except Exception:
         GFPGANer = None""")
                 p_enh.write_text(src_enh, encoding='utf-8')
                 print('[avatar] auto-patched SadTalker face_enhancer.py (safe GFPGANer import)', flush=True)
+
+        p_u = SADTALKER_DIR / 'src' / 'utils' / 'preprocess.py'
+        if p_u.exists():
+            src_u = p_u.read_text(encoding='utf-8')
+            old_u = 'trans_params = np.array([float(item) for item in np.hsplit(trans_params, 5)]).astype(np.float32)'
+            new_u = 'trans_params = np.asarray(trans_params, dtype=np.float32).reshape(-1)'
+            if old_u in src_u:
+                src_u = src_u.replace(old_u, new_u)
+                p_u.write_text(src_u, encoding='utf-8')
+                print('[avatar] auto-patched SadTalker src/utils/preprocess.py (trans_params hsplit)', flush=True)
     except Exception as e:
         print('[avatar] preprocess patch warn:', e, flush=True)
 

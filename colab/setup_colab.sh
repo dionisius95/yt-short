@@ -252,6 +252,21 @@ else:
 
 io.open(p, "w", encoding="utf-8").write(src)
 
+# 2b) Patch src/utils/preprocess.py (trans_params hsplit TypeError on numpy 2.x)
+p_util = "/content/SadTalker/src/utils/preprocess.py"
+try:
+    src_u = io.open(p_util, encoding="utf-8").read()
+    old_u = "trans_params = np.array([float(item) for item in np.hsplit(trans_params, 5)]).astype(np.float32)"
+    new_u = "trans_params = np.asarray(trans_params, dtype=np.float32).reshape(-1)"
+    if old_u in src_u:
+        src_u = src_u.replace(old_u, new_u)
+        io.open(p_util, "w", encoding="utf-8").write(src_u)
+        print("[patch] src/utils/preprocess.py: FIXED (trans_params hsplit)")
+    else:
+        print("[patch] src/utils/preprocess.py: sudah aman / pola tidak ada")
+except Exception as e_u:
+    print("[patch] src/utils/preprocess.py warn:", e_u)
+
 # 3) Patch face_enhancer.py: ImportError GFPGANer fallback
 p_enh = "/content/SadTalker/src/utils/face_enhancer.py"
 try:
