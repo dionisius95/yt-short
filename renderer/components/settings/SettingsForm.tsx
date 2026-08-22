@@ -518,7 +518,7 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
               id="setting-attribution-template"
               value={form.attributionTemplate ?? ''}
               onChange={(e) => set('attributionTemplate', e.target.value)}
-              rows={3}
+              rows={2}
               placeholder="Source: {title} {url}"
               className={cn(
                 'rounded-md border border-border bg-background px-3 py-2 text-sm text-text-primary resize-none',
@@ -530,6 +530,53 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
               Use <code>{'{title}'}</code> and <code>{'{url}'}</code> placeholders for the source video.
             </p>
           </Field>
+
+          <label htmlFor="setting-auto-fair-use" className="flex items-start gap-3 cursor-pointer">
+            <input
+              id="setting-auto-fair-use"
+              type="checkbox"
+              checked={form.autoFairUseDisclaimer ?? true}
+              onChange={(e) => set('autoFairUseDisclaimer', e.target.checked)}
+              className="mt-0.5 h-4 w-4 shrink-0 accent-accent"
+            />
+            <span className="text-sm text-text-primary">
+              Auto-add Fair Use / Transformative Commentary disclaimer (YPP Protection)
+              <span className="block text-[10px] text-text-secondary">
+                Menyertakan klausul Fair Use dan penjelasan analisis edukatif otomatis pada deskripsi video YouTube.
+              </span>
+            </span>
+          </label>
+
+          <Field label="Fair Use Disclaimer Template" id="setting-fair-use-template">
+            <textarea
+              id="setting-fair-use-template"
+              value={form.fairUseDisclaimerTemplate ?? ''}
+              onChange={(e) => set('fairUseDisclaimerTemplate', e.target.value)}
+              rows={2}
+              placeholder="---\nOriginal Source: {url}\nTransformative Commentary & Educational Analysis."
+              className={cn(
+                'rounded-md border border-border bg-background px-3 py-2 text-sm text-text-primary resize-none',
+                'placeholder:text-text-secondary/50',
+                'focus:outline-none focus:ring-2 focus:ring-accent transition-micro'
+              )}
+            />
+          </Field>
+
+          <label htmlFor="setting-altered-content" className="flex items-start gap-3 cursor-pointer">
+            <input
+              id="setting-altered-content"
+              type="checkbox"
+              checked={form.hasAlteredOrSyntheticContent ?? true}
+              onChange={(e) => set('hasAlteredOrSyntheticContent', e.target.checked)}
+              className="mt-0.5 h-4 w-4 shrink-0 accent-accent"
+            />
+            <span className="text-sm text-text-primary">
+              Declare Altered / Synthetic Media to YouTube (YPP Policy 2024–2026)
+              <span className="block text-[10px] text-text-secondary">
+                Otomatis mendeklarasikan konten AI / media sintetis saat upload agar akun YouTube aman dan patuh aturan YPP.
+              </span>
+            </span>
+          </label>
 
           <Field label="Default Audio for Clips" id="setting-audio-mode">
             <SegmentedControl
@@ -596,6 +643,165 @@ export function SettingsForm({ settings, onSaved, onError }: SettingsFormProps) 
               </Field>
             </>
           )}
+        </div>
+      </div>
+
+      {/* ── Automatic B-Roll Settings (YPP Anti-Reused Content & Retention) ── */}
+      <div>
+        <div className="mb-4">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-cyan-400" />
+            <h2 className="text-sm font-semibold text-text-primary">
+              Automatic B-Roll Library & Cutaway Settings
+            </h2>
+          </div>
+          <p className="text-xs text-text-secondary mt-0.5">
+            Konfigurasi pemotongan visual B-roll otomatis untuk Segmen B. Memutus fingerprint visual dan menjaga retensi penonton.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-4 rounded-xl border border-border bg-surface p-4">
+          <label htmlFor="setting-auto-broll" className="flex items-start gap-3 cursor-pointer">
+            <input
+              id="setting-auto-broll"
+              type="checkbox"
+              checked={form.brollConfig?.enabled ?? true}
+              onChange={(e) =>
+                set('brollConfig', {
+                  ...(form.brollConfig ?? {
+                    category: 'minecraft',
+                    mode: 'fullscreen_cutaway',
+                    customDir: '',
+                    frequencySec: 6,
+                    durationSec: 2.5,
+                  }),
+                  enabled: e.target.checked,
+                })
+              }
+              className="mt-0.5 h-4 w-4 shrink-0 accent-accent"
+            />
+            <span className="text-sm text-text-primary">
+              Aktifkan Auto B-Roll Cutaway secara default
+              <span className="block text-[10px] text-text-secondary">
+                Secara otomatis menyisipkan cuplikan B-roll gameplay / visual cutaway pada Segmen B tanpa memutus audio dialog.
+              </span>
+            </span>
+          </label>
+
+          <Field label="Kategori Default B-Roll" id="setting-broll-category">
+            <select
+              id="setting-broll-category"
+              value={form.brollConfig?.category ?? 'minecraft'}
+              onChange={(e) =>
+                set('brollConfig', {
+                  ...(form.brollConfig ?? {
+                    enabled: true,
+                    mode: 'fullscreen_cutaway',
+                    customDir: '',
+                    frequencySec: 6,
+                    durationSec: 2.5,
+                  }),
+                  category: e.target.value as any,
+                })
+              }
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              <option value="contextual">🎯 Contextual AI (Pexels / Pixabay Auto-Match Kata Kunci)</option>
+              <option value="minecraft">Minecraft (Parkour & Gameplay)</option>
+              <option value="gameplay">Gameplay & Action</option>
+              <option value="satisfying">Satisfying & Lo-Fi Waves</option>
+              <option value="all">Semua Preset (Random Acak)</option>
+              <option value="custom">Folder Kustom Pengguna</option>
+            </select>
+          </Field>
+
+          <Field label="Pexels API Key (Free Auto-Download Video)" id="setting-pexels-key">
+            <input
+              id="setting-pexels-key"
+              type="password"
+              value={form.pexelsApiKey ?? ''}
+              onChange={(e) => set('pexelsApiKey', e.target.value)}
+              placeholder="Masukkan API Key Pexels (Gratis di pexels.com/api)"
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            />
+            <p className="text-[10px] text-text-secondary mt-1">
+              Gratis 200 request/jam. Digunakan untuk mendownload video 9:16 otomatis sesuai kata kunci naskah percakapan.
+            </p>
+          </Field>
+
+          <Field label="Pixabay API Key (Opsional / Cadangan)" id="setting-pixabay-key">
+            <input
+              id="setting-pixabay-key"
+              type="password"
+              value={form.pixabayApiKey ?? ''}
+              onChange={(e) => set('pixabayApiKey', e.target.value)}
+              placeholder="Masukkan API Key Pixabay (Gratis di pixabay.com/api/docs)"
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            />
+          </Field>
+
+          <Field label="Custom B-Roll Folder (Opsional)" id="setting-broll-custom-dir">
+            <div className="flex gap-2">
+              <input
+                id="setting-broll-custom-dir"
+                type="text"
+                readOnly
+                value={form.brollConfig?.customDir ?? ''}
+                placeholder="Folder video B-roll pribadi (misal: D:\Project Musik\games)"
+                className={cn(
+                  'flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm text-text-primary',
+                  'placeholder:text-text-secondary/50 cursor-default',
+                  'focus:outline-none focus:ring-2 focus:ring-accent'
+                )}
+              />
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const folderPath = await ipc.dialog.openDirectory();
+                    if (folderPath) {
+                      set('brollConfig', {
+                        ...(form.brollConfig ?? {
+                          enabled: true,
+                          category: 'custom',
+                          mode: 'fullscreen_cutaway',
+                          frequencySec: 6,
+                          durationSec: 2.5,
+                        }),
+                        customDir: folderPath,
+                      });
+                    }
+                  } catch { /* cancelled */ }
+                }}
+                className="shrink-0 rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-medium hover:bg-surface-hover transition-micro"
+              >
+                Pilih Folder
+              </button>
+              {form.brollConfig?.customDir && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    set('brollConfig', {
+                      ...(form.brollConfig ?? {
+                        enabled: true,
+                        category: 'minecraft',
+                        mode: 'fullscreen_cutaway',
+                        frequencySec: 6,
+                        durationSec: 2.5,
+                      }),
+                      customDir: '',
+                    })
+                  }
+                  className="text-xs text-destructive hover:underline"
+                >
+                  Hapus
+                </button>
+              )}
+            </div>
+            <p className="text-[10px] text-text-secondary mt-1">
+              Aplikasi otomatis membaca file .mp4/.mov di folder ini dan mengacaknya saat proses render.
+            </p>
+          </Field>
         </div>
       </div>
 

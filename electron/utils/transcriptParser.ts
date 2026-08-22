@@ -103,10 +103,14 @@ export function parseWhisperOutput(json: unknown): TranscriptWord[] {
     for (const rawWord of seg.words) {
       if (!isWhisperWord(rawWord)) continue;
 
+      const sMs = Math.round(rawWord.start * 1000);
+      const rawEndMs = Math.round(rawWord.end * 1000);
+      const eMs = (rawEndMs > sMs && rawEndMs - sMs <= 4000) ? rawEndMs : sMs + 800;
+
       words.push({
         word: rawWord.word,
-        startMs: Math.round(rawWord.start * 1000),
-        endMs: Math.round(rawWord.end * 1000),
+        startMs: sMs,
+        endMs: eMs,
         confidence: rawWord.probability,
       });
     }

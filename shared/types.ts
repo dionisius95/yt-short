@@ -152,7 +152,8 @@ export type CaptionFont =
   | 'Lilita One'
   | 'Bangers'
   | 'Bebas Neue'
-  | 'Fredoka One';
+  | 'Fredoka One'
+  | 'System';
 
 export type CaptionAnimation = 'none' | 'fade' | 'pop' | 'slide-up';
 export type CaptionLines = 1 | 2 | 3;
@@ -412,6 +413,8 @@ export interface UploadRequest {
   defaultAudioLanguage?: string; // e.g. 'id', 'en'
   defaultLanguage?: string; // e.g. 'id', 'en'
   customThumbnailPath?: string; // Absolute path to custom thumbnail image
+  hasAlteredOrSyntheticContent?: boolean; // YouTube Altered or Synthetic Content disclosure (YPP Compliance)
+  autoFairUseDisclaimer?: boolean; // Append Fair Use / Transformative Commentary disclaimer
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +486,12 @@ export interface AppSettings {
   autoAttribution: boolean;
   /** Attribution template. {title} and {url} are replaced with the source video's. */
   attributionTemplate: string;
+  /** Auto-append Fair Use / Transformative Commentary disclaimer to description. */
+  autoFairUseDisclaimer?: boolean;
+  /** Fair Use disclaimer template. {url} is replaced with the source video URL. */
+  fairUseDisclaimerTemplate?: string;
+  /** Default declare altered or synthetic media to YouTube (YPP Policy). */
+  hasAlteredOrSyntheticContent?: boolean;
   /** Default audio treatment for generated clips. */
   defaultAudioMode: 'keep' | 'mute' | 'replace';
   /** Background music file used when defaultAudioMode === 'replace'. */
@@ -507,6 +516,12 @@ export interface AppSettings {
   // --- Multi-Account & Preview Presets ------------------------------------
   accounts?: UploadAccount[];
   previewPresets?: PreviewPreset[];
+  // --- B-Roll Settings ---------------------------------------------------
+  brollConfig?: BrollConfig;
+  /** Pexels API key for free automatic contextual B-roll video downloads */
+  pexelsApiKey?: string;
+  /** Pixabay API key for free automatic contextual B-roll video downloads */
+  pixabayApiKey?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -668,6 +683,8 @@ export interface CropFrame {
   cy: number;    // crop center Y
   hasFace: boolean;
   faceSpanW?: number;  // pixel width spanning all faces in original res (0 = single face)
+  isCut?: boolean;     // true if frame marks a scene/shot cut boundary
+  confidence?: number;
 }
 
 export interface SubtitleBlock {
@@ -730,6 +747,22 @@ export interface CommentatorVoice {
 
 export type CommentatorTransitionEffect = 'fade' | 'slideleft' | 'slideright' | 'wipeleft' | 'pixelize' | 'zoomin' | 'none';
 
+// ---------------------------------------------------------------------------
+// Automatic B-Roll Cutaway
+// ---------------------------------------------------------------------------
+
+export type BrollCategory = 'minecraft' | 'gameplay' | 'satisfying' | 'contextual' | 'custom' | 'all';
+export type BrollMode = 'fullscreen_cutaway' | 'pip_overlay';
+
+export interface BrollConfig {
+  enabled: boolean;
+  category?: BrollCategory;
+  mode?: BrollMode;
+  customDir?: string;
+  frequencySec?: number; // interval between cuts in seconds (e.g. 6)
+  durationSec?: number;  // duration of each b-roll cut in seconds (e.g. 2.5)
+}
+
 export interface CommentatorRequest {
   clipId?: string;
   videoPath: string;
@@ -748,6 +781,7 @@ export interface CommentatorRequest {
   customThumbnailPath?: string;
   brandingLogoPath?: string;
   speakerAudioPath?: string;
+  brollConfig?: BrollConfig;
   words?: TranscriptWord[];
   originalTranscriptWords?: TranscriptWord[];
   outputDir?: string;
@@ -764,6 +798,7 @@ export interface CommentatorResult {
   takeawayText?: string;
   durationMs: number;
 }
+
 
 
 

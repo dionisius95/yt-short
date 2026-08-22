@@ -8,7 +8,7 @@
 
 import { useState, useEffect } from 'react';
 import { ipc } from '../../lib/ipc-client';
-import type { CaptionPresetId, CaptionStyle, CaptionFont, CommentatorVoiceProvider, CommentatorTransitionEffect } from '../../../shared/types';
+import type { CaptionPresetId, CaptionStyle, CaptionFont, CommentatorVoiceProvider, CommentatorTransitionEffect, BrollCategory, BrollConfig } from '../../../shared/types';
 import { CAPTION_PRESETS } from '../../../shared/types';
 import { cn } from '../../lib/utils';
 import { AvatarControls } from '../project/AvatarControls';
@@ -52,7 +52,7 @@ const PRESET_OPTIONS: Array<{ id: CaptionPresetId; name: string; desc: string }>
   { id: 'custom',     name: 'Custom',      desc: 'Your own settings' },
 ];
 
-const FONT_OPTIONS: CaptionFont[] = ['Montserrat', 'Impact', 'Oswald', 'Arial', 'Roboto', 'Anton', 'Lilita One', 'Bangers', 'Bebas Neue', 'Fredoka One'];
+const FONT_OPTIONS: CaptionFont[] = ['Montserrat', 'Impact', 'Oswald', 'Arial', 'Roboto', 'Anton', 'Lilita One', 'Bangers', 'Bebas Neue', 'Fredoka One', 'System'];
 
 export function CommentatorModal({ videoPath, clipId, projectId, initialPresetId, initialCaptionStyle, optionsJson, onClose, onSuccess }: CommentatorModalProps) {
   const [targetAudience, setTargetAudience] = useState<'US' | 'UK' | 'ID'>('US');
@@ -115,6 +115,9 @@ export function CommentatorModal({ videoPath, clipId, projectId, initialPresetId
   const [brandingLogoPath, setBrandingLogoPath] = useState<string>('');
   const [speakerAudioPath, setSpeakerAudioPath] = useState<string>('');
   const [avatar, setAvatar] = useState<AvatarOverlay>(DEFAULT_AVATAR_OVERLAY);
+  const [brollEnabled, setBrollEnabled] = useState<boolean>(true);
+  const [brollCategory, setBrollCategory] = useState<BrollCategory>('minecraft');
+  const [brollCustomDir, setBrollCustomDir] = useState<string>('');
 
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -126,6 +129,11 @@ export function CommentatorModal({ videoPath, clipId, projectId, initialPresetId
   useEffect(() => {
     ipc.settings.get().then((s: any) => {
       if (s?.speakerAudioPath) setSpeakerAudioPath(s.speakerAudioPath);
+      if (s?.brollConfig) {
+        if (s.brollConfig.enabled !== undefined) setBrollEnabled(s.brollConfig.enabled);
+        if (s.brollConfig.category) setBrollCategory(s.brollConfig.category);
+        if (s.brollConfig.customDir) setBrollCustomDir(s.brollConfig.customDir);
+      }
     }).catch(() => {});
 
     const unsub = ipc.commentator.onProgress((data: any) => {
@@ -192,10 +200,10 @@ export function CommentatorModal({ videoPath, clipId, projectId, initialPresetId
     }
   };
 
-  const updateCaptionStyle = (patch: Partial<CaptionStyle>) => {
+  const updateCaptionStyle = (updates: Partial<CaptionStyle>) => {
     setCaptionStyle((prev) => ({
       ...prev,
-      ...patch,
+      ...updates,
       presetId: 'custom',
     }));
   };
@@ -225,6 +233,16 @@ export function CommentatorModal({ videoPath, clipId, projectId, initialPresetId
         captionY: captionY ?? captionStyle.captionY,
       };
 
+      const brollConf: BrollConfig | undefined = brollEnabled
+        ? {
+            enabled: true,
+            category: brollCategory,
+            customDir: brollCustomDir || undefined,
+            frequencySec: 6,
+            durationSec: 2.5,
+          }
+        : undefined;
+
       const result = await ipc.commentator.generate({
         clipId,
         videoPath,
@@ -243,8 +261,9 @@ export function CommentatorModal({ videoPath, clipId, projectId, initialPresetId
         customThumbnailPath: customThumbnailPath || undefined,
         brandingLogoPath: brandingLogoPath || undefined,
         speakerAudioPath: speakerAudioPath || undefined,
+        brollConfig: brollConf,
         avatar:
-          commentaryMode === 'hook_replay_outro' && avatar.enabled && avatar.imagePath
+          avatar.enabled && avatar.imagePath
             ? avatar
             : undefined,
       }) as any;
@@ -299,23 +318,33 @@ export function CommentatorModal({ videoPath, clipId, projectId, initialPresetId
             </label>
             <div className="grid grid-cols-3 gap-3">
               {[
-                { id: 'full', label: 'Full Commentary', desc: 'Dubbing & subtitles span the full video duration' },
-                { id: 'hook_only', label: 'Hook + Replay', desc: '3s Hook intro + BGM, then raw clip replays' },
-                { id: 'hook_replay_outro', label: 'Hook + Replay + Moral Takeaway', desc: '3s Hook intro + raw clip + educational moral lesson takeaway outro (100% Monetizable)' },
+                { id: 'hook_replay_outro', label: 'Hook + Replay + Takeaway', desc: 'Hook intro + raw clip + moral/educational takeaway outro', badge: '★ YPP Monetized' },
+                { id: 'hook_only', label: 'Hook + Replay', desc: '3s Hook intro + BGM, then raw clip replays', badge: 'Fast Viral' },
+                { id: 'full', label: 'Full Commentary', desc: 'Dubbing & subtitles span the full video duration', badge: 'Full Voice' },
               ].map((m) => (
                 <button
                   key={m.id}
                   type="button"
                   onClick={() => setCommentaryMode(m.id as any)}
                   className={cn(
-                    'flex flex-col items-start rounded-xl border p-3 text-left transition-all',
+                    'relative flex flex-col items-start rounded-xl border p-3 text-left transition-all',
                     commentaryMode === m.id
                       ? 'border-indigo-500/80 bg-indigo-500/10 ring-2 ring-indigo-500/30'
                       : 'border-white/10 bg-surface-elevated/40 hover:bg-white/5'
                   )}
                 >
-                  <span className="text-sm font-semibold text-text-primary">{m.label}</span>
-                  <span className="text-xs text-text-secondary mt-0.5">{m.desc}</span>
+                  <div className="flex items-center justify-between w-full mb-1">
+                    <span className="text-sm font-semibold text-text-primary">{m.label}</span>
+                    {m.badge && (
+                      <span className={cn(
+                        'text-[9px] font-bold px-1.5 py-0.5 rounded-full',
+                        m.id === 'hook_replay_outro' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-white/10 text-text-secondary'
+                      )}>
+                        {m.badge}
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-xs text-text-secondary">{m.desc}</span>
                 </button>
               ))}
             </div>
@@ -538,18 +567,70 @@ export function CommentatorModal({ videoPath, clipId, projectId, initialPresetId
             </div>
           )}
 
-          {/* Talking Avatar (3-segment mode only) */}
-          {commentaryMode === 'hook_replay_outro' && (
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-text-secondary mb-2">
-                Talking Avatar
+          {/* Talking Avatar Overlay */}
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-text-secondary mb-2">
+              Talking Avatar Overlay
+            </label>
+            <AvatarControls value={avatar} onChange={setAvatar} />
+            <p className="text-[10px] text-text-secondary mt-2">
+              Avatar berbicara & berkedip natural mengikuti suara dubbing komentator AI. Fitur opsional — jika dimatikan video tetap dirender normal.
+            </p>
+          </div>
+
+          {/* Automatic B-Roll Intercut / Cutaways */}
+          <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-4 space-y-3 animate-fade-in">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full bg-cyan-400 animate-pulse" />
+                <label className="text-xs font-semibold uppercase tracking-wider text-cyan-200">
+                  ⚡ Auto B-Roll Cutaway (Pacing Visual Intercut)
+                </label>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={brollEnabled}
+                  onChange={(e) => setBrollEnabled(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-surface-elevated peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-cyan-500" />
               </label>
-              <AvatarControls value={avatar} onChange={setAvatar} />
-              <p className="text-[10px] text-text-secondary mt-2">
-                Avatar berbicara & berkedip di Segmen A (hook) dan C (takeaway), diam namun tetap berkedip natural di Segmen B (replay). Fitur tambahan opsional — tidak mengubah pipeline commentary yang sudah ada saat toggle dimatikan.
-              </p>
             </div>
-          )}
+
+              {brollEnabled && (
+                <div className="space-y-3 pt-1">
+                  <div className="grid grid-cols-5 gap-2">
+                    {[
+                      { id: 'contextual', label: '🎯 AI Context', badge: 'Auto Match' },
+                      { id: 'minecraft', label: 'Minecraft', badge: 'Popular' },
+                      { id: 'gameplay', label: 'Gameplay', badge: 'Action' },
+                      { id: 'satisfying', label: 'Satisfying', badge: 'Relax' },
+                      { id: 'all', label: 'All Presets', badge: 'Random' },
+                    ].map((cat) => (
+                      <button
+                        key={cat.id}
+                        type="button"
+                        onClick={() => setBrollCategory(cat.id as any)}
+                        className={cn(
+                          'flex flex-col items-center justify-center rounded-xl border p-2 text-center transition-all',
+                          brollCategory === cat.id
+                            ? 'border-cyan-500/80 bg-cyan-500/20 ring-2 ring-cyan-500/40 text-white font-semibold'
+                            : 'border-white/10 bg-surface-elevated/40 hover:bg-white/5 text-text-secondary'
+                        )}
+                      >
+                        <span className="text-xs">{cat.label}</span>
+                        <span className="text-[9px] text-text-muted mt-0.5">{cat.badge}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  <p className="text-[10px] text-cyan-300/80 leading-relaxed">
+                    💡 Menyisipkan B-roll cutaway otomatis setiap ~6 dtk (durasi 2.5 dtk) dengan audio dialog tetap mengalir tanpa jeda. Efektif merusak sidik jari <em>Reused Content</em> dan menaikkan retensi penonton.
+                  </p>
+                </div>
+              )}
+            </div>
 
           {/* Target Audience */}
           <div>

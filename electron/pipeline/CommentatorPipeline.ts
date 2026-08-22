@@ -37,6 +37,8 @@ export class CommentatorPipeline {
       xttsColabUrl?: string;
       speakerAudioPath?: string;
       whisperModelSize?: string;
+      pexelsApiKey?: string;
+      pixabayApiKey?: string;
     }
   ): Promise<CommentatorResult> {
     const {
@@ -118,9 +120,12 @@ export class CommentatorPipeline {
       }
     }
 
+    const sttLang = req.targetAudience === 'ID' ? 'id' : 'en';
+    const sttModelSize = 'base';
+
     try {
-      log.info('Transcribing TTS track with STT engine for 100% exact word synchronization');
-      const sttResult = await this.transcriber.transcribe('commentary-tts', ttsTrackPath, 'en', 'tiny', undefined, undefined, undefined, apiKeys.googleServiceAccountPath);
+      log.info({ sttLang, sttModelSize }, 'Transcribing Hook TTS track with high-accuracy STT engine');
+      const sttResult = await this.transcriber.transcribe('commentary-tts', ttsTrackPath, sttLang, sttModelSize, undefined, undefined, undefined, apiKeys.googleServiceAccountPath);
       if (sttResult?.words && sttResult.words.length > 0) {
         alignedWords = sttResult.words;
         log.info({ wordCount: alignedWords.length }, 'Successfully aligned TTS subtitles via STT engine');
@@ -167,7 +172,7 @@ export class CommentatorPipeline {
         }
 
         try {
-          const sttTakeaway = await this.transcriber.transcribe('takeaway-tts', takeawayTtsPath, 'en', 'tiny', undefined, undefined, undefined, apiKeys.googleServiceAccountPath);
+          const sttTakeaway = await this.transcriber.transcribe('takeaway-tts', takeawayTtsPath, sttLang, sttModelSize, undefined, undefined, undefined, apiKeys.googleServiceAccountPath);
           if (sttTakeaway?.words && sttTakeaway.words.length > 0) {
             takeawayAlignedWords = sttTakeaway.words;
             log.info({ wordCount: takeawayAlignedWords.length }, 'Takeaway TTS subtitles aligned via STT engine');
@@ -180,13 +185,20 @@ export class CommentatorPipeline {
       }
     }
 
-    // 5c. For hook_only mode (Mode 2), generate reaction commentary TTS for Segment B
+    // 5c. For hook_only and hook_replay_outro modes, generate reaction / mid-scene commentary TTS for Segment B
     let reactionTtsPath = '';
+    let actualReactionDurMs = 0;
     let reactionAlignedWords: TranscriptWord[] = [];
-    if (req.commentaryMode === 'hook_only' && scriptResult.scriptText && scriptResult.scriptText.trim()) {
-      this._emitProgress(78, 'reaction', 'Generating reaction commentary track for Segment B...');
-      log.info('Generating Segment B reaction commentary TTS from script');
-      let reactionText = scriptResult.scriptText.trim();
+    const interjectionText = (scriptResult.middleInterjectionText || '').trim();
+    const shouldGenReaction = (req.commentaryMode === 'hook_only' && scriptResult.scriptText && scriptResult.scriptText.trim()) ||
+      (req.commentaryMode === 'hook_replay_outro' && !!interjectionText);
+
+    if (shouldGenReaction) {
+      this._emitProgress(78, 'reaction', 'Generating mid-scene commentary & voice interjection for Segment B...');
+      log.info({ mode: req.commentaryMode }, 'Generating Segment B reaction commentary TTS');
+      let reactionText = (req.commentaryMode === 'hook_replay_outro' && interjectionText)
+        ? interjectionText
+        : scriptResult.scriptText.trim();
       const hookTextClean = (scriptResult.hookText || '').trim();
 
       // Strip hookText if reactionText starts with hookText to prevent repeating the hook sentence twice!
@@ -211,7 +223,7 @@ export class CommentatorPipeline {
           });
 
           reactionTtsPath = reactionResult.ttsTrackPath;
-          let actualReactionDurMs = durationMs;
+          actualReactionDurMs = durationMs;
           try { actualReactionDurMs = await this.processor.getVideoDurationMs(reactionTtsPath); } catch {}
 
           reactionAlignedWords = (actualReactionDurMs > 0 && actualReactionDurMs !== durationMs)
@@ -225,7 +237,7 @@ export class CommentatorPipeline {
           }
 
           try {
-            const sttReaction = await this.transcriber.transcribe('reaction-tts', reactionTtsPath, 'en', 'tiny', undefined, undefined, undefined, apiKeys.googleServiceAccountPath);
+            const sttReaction = await this.transcriber.transcribe('reaction-tts', reactionTtsPath, sttLang, sttModelSize, undefined, undefined, undefined, apiKeys.googleServiceAccountPath);
             if (sttReaction?.words && sttReaction.words.length > 0) {
               reactionAlignedWords = sttReaction.words;
               log.info({ wordCount: reactionAlignedWords.length }, 'Reaction TTS subtitles aligned via STT engine');
@@ -234,7 +246,7 @@ export class CommentatorPipeline {
             log.warn({ sttErr }, 'Reaction STT fallback to character-weighted timings');
           }
 
-          log.info({ reactionTtsPath }, 'Successfully generated reaction commentary TTS for Segment B');
+          log.info({ reactionTtsPath, actualReactionDurMs }, 'Successfully generated reaction commentary TTS for Segment B');
         } catch (reactionErr) {
           log.warn({ reactionErr }, 'Failed to generate reaction commentary TTS, Segment B will have no AI narration');
         }
@@ -242,14 +254,11 @@ export class CommentatorPipeline {
     }
 
     // 5d. Talking-avatar clips (ADDITIVE, guarded). Only for 3-segment mode.
-    //     A/C = talk (lip-sync from TTS), B = idle (silent, blinking). Any
+    //     A/C = talk (lip-sync from TTS), B = idle (silent, blinking), Jeda = talk. Any
     //     failure leaves avatarClips undefined so the render is unchanged.
     let avatarErrorMsg = '';
     let avatarClips: AvatarClips | undefined;
-    let avatarSegASec = 0;
-    let avatarSegBSec = 0;
-    let avatarSegCSec = 0;
-    if (is3Segment && req.avatar?.enabled && req.avatar.imagePath && fs.existsSync(req.avatar.imagePath)) {
+    if (req.avatar?.enabled && req.avatar.imagePath && fs.existsSync(req.avatar.imagePath)) {
       try {
         const baseUrl = AvatarGenerator.resolveBaseUrl(req.avatar, apiKeys.xttsColabUrl);
         if (!baseUrl) throw new Error('avatar base URL empty (set avatarColabUrl / xttsColabUrl)');
@@ -257,41 +266,64 @@ export class CommentatorPipeline {
         const dir = outputDir || path.dirname(videoPath);
         const clips: AvatarClips = {};
 
-        // Segment A (hook) -> talk
-        clips.segmentA = await this.avatarGen.generate({
-          imagePath: req.avatar.imagePath,
-          audioPath: ttsTrackPath,
-          mode: 'talk',
-          baseUrl,
-          outputPath: path.join(dir, 'avatar_segA.mp4'),
-          removeBackground: req.avatar.removeBackground,
-        });
-        avatarSegASec = (actualTtsDurMs || ttsDurationMs) / 1000;
-
-        // Segment C (takeaway) -> talk
-        if (takeawayTtsPath) {
-          clips.segmentC = await this.avatarGen.generate({
+        if (is3Segment) {
+          // Segment A (hook) -> talk
+          clips.segmentA = await this.avatarGen.generate({
             imagePath: req.avatar.imagePath,
-            audioPath: takeawayTtsPath,
+            audioPath: ttsTrackPath,
             mode: 'talk',
             baseUrl,
-            outputPath: path.join(dir, 'avatar_segC.mp4'),
+            outputPath: path.join(dir, 'avatar_segA.mp4'),
             removeBackground: req.avatar.removeBackground,
           });
-          avatarSegCSec = (takeawayDurationMs || 0) / 1000;
-        }
 
-        // Segment B (replay) -> idle (silent but blinking/expressive)
-        clips.segmentB = await this.avatarGen.generate({
-          imagePath: req.avatar.imagePath,
-          audioPath: null,
-          mode: 'idle',
-          baseUrl,
-          outputPath: path.join(dir, 'avatar_segB.mp4'),
-          durationSec: Math.max(1, Math.round(durationMs / 1000)),
-          removeBackground: req.avatar.removeBackground,
-        });
-        avatarSegBSec = durationMs / 1000;
+          // Segment C (takeaway) -> talk
+          if (takeawayTtsPath) {
+            clips.segmentC = await this.avatarGen.generate({
+              imagePath: req.avatar.imagePath,
+              audioPath: takeawayTtsPath,
+              mode: 'talk',
+              baseUrl,
+              outputPath: path.join(dir, 'avatar_segC.mp4'),
+              removeBackground: req.avatar.removeBackground,
+            });
+          }
+
+          // Segment B (replay idle watch)
+          clips.segmentB = await this.avatarGen.generate({
+            imagePath: req.avatar.imagePath,
+            audioPath: null,
+            mode: 'idle',
+            baseUrl,
+            outputPath: path.join(dir, 'avatar_segB_idle.mp4'),
+            durationSec: Math.max(1, Math.round(durationMs / 1000)),
+            removeBackground: req.avatar.removeBackground,
+          });
+
+          // Segment Jeda (mid-scene vocal interruption -> talk)
+          if (reactionTtsPath && fs.existsSync(reactionTtsPath)) {
+            clips.segmentJeda = await this.avatarGen.generate({
+              imagePath: req.avatar.imagePath,
+              audioPath: reactionTtsPath,
+              mode: 'talk',
+              baseUrl,
+              outputPath: path.join(dir, 'avatar_segB_jeda.mp4'),
+              durationSec: Math.max(1, Math.round((actualReactionDurMs || 2800) / 1000)),
+              removeBackground: req.avatar.removeBackground,
+            });
+          }
+        } else {
+          // Full Commentary Mode -> single continuous talking avatar across the video
+          clips.segmentA = await this.avatarGen.generate({
+            imagePath: req.avatar.imagePath,
+            audioPath: ttsTrackPath,
+            mode: 'talk',
+            baseUrl,
+            outputPath: path.join(dir, 'avatar_full.mp4'),
+            durationSec: Math.max(1, Math.round(durationMs / 1000)),
+            removeBackground: req.avatar.removeBackground,
+          });
+        }
 
         avatarClips = clips;
       } catch (avErr) {
@@ -361,11 +393,17 @@ export class CommentatorPipeline {
       optionsJson: req.optionsJson,
       reactionTtsPath: reactionTtsPath || undefined,
       reactionWords: reactionAlignedWords.length > 0 ? reactionAlignedWords : undefined,
+      reactionDurationMs: actualReactionDurMs || undefined,
+      interruptionTimestampSec: scriptResult.interruptionTimestampSec,
       takeawayTtsPath: takeawayTtsPath || undefined,
       takeawayWords: takeawayAlignedWords.length > 0 ? takeawayAlignedWords : undefined,
       customThumbnailPath: req.customThumbnailPath,
       brandingLogoPath: req.brandingLogoPath,
+      brollConfig: req.brollConfig,
       originalTranscriptWords: segBOriginalWords,
+      pexelsApiKey: apiKeys.pexelsApiKey,
+      pixabayApiKey: apiKeys.pixabayApiKey,
+      hookHeadline: scriptResult.hookText,
     });
 
     log.info({ outputPath }, 'Successfully generated commentary video');
@@ -376,41 +414,69 @@ export class CommentatorPipeline {
     if (avatarClips && req.avatar) {
       try {
         this._emitProgress(96, 'avatar', 'Compositing talking avatar overlay...');
-        // Re-derive avatar segment offsets to match Processor's REAL 3-seg
-        // timeline. Processor pads Segment A video to hookAudio + 650ms and
-        // Segment C to takeawayAudio + 300ms, then joins the three segments
-        // with an xfade of tDur that pulls every later segment earlier. The
-        // raw TTS/clip durations set in step 5d made Segment C start ~0.5-1s
-        // too early and out of sync with its dubbed audio/video, so recompute
-        // the offsets here to mirror the Processor timeline exactly.
-        {
+        const segments: Array<{ clipPath: string; startSec: number; endSec: number }> = [];
+
+        if (is3Segment) {
           const hasSegC = !!avatarClips.segmentC;
-          const durA = Math.max(2000, Math.ceil(actualTtsDurMs || ttsDurationMs) + 650) / 1000;
-          const durB = durationMs / 1000;
-          const durC = Math.max(3000, Math.ceil(takeawayDurationMs || 0) + 300) / 1000;
+          const durA = Math.max(3000, Math.ceil((actualTtsDurMs || ttsDurationMs) / 1.15) + 1200 + 450) / 1000;
+          const durC = Math.min(4500, Math.max(2500, Math.ceil((takeawayDurationMs || 0) / 1.15) + 300)) / 1000;
           const useXfade = (req.transitionEffect || 'fade') !== 'none';
           const tDur = useXfade
-            ? Math.min(0.35, ...(hasSegC ? [durA, durB, durC] : [durA, durB]).map((d) => d * 0.25))
+            ? Math.min(0.35, ...(hasSegC ? [durA, durationMs / 1000, durC] : [durA, durationMs / 1000]).map((d) => d * 0.25))
             : 0;
-          avatarSegASec = durA - tDur / 2;
-          avatarSegBSec = durB - tDur;
-          avatarSegCSec = durC - tDur / 2;
+
+          let cursor = 0;
+          if (avatarClips.segmentA) {
+            segments.push({ clipPath: avatarClips.segmentA, startSec: cursor, endSec: cursor + durA - tDur / 2 });
+          }
+          cursor += (durA - tDur / 2);
+
+          const hasJeda = !!avatarClips.segmentJeda && durationMs >= 14000;
+          if (hasJeda) {
+            let interruptionMs = scriptResult.interruptionTimestampSec
+              ? Math.round(scriptResult.interruptionTimestampSec * 1000)
+              : Math.round(durationMs * 0.60);
+            interruptionMs = Math.max(5000, Math.min(durationMs - 4000, interruptionMs));
+            const durB1 = interruptionMs / 1000;
+            const durJeda = Math.max(1.8, (Math.ceil((actualReactionDurMs || 2800) / 1.15) + 300) / 1000);
+            const durB2 = (durationMs - interruptionMs) / 1000;
+
+            // B1 (Idle)
+            if (avatarClips.segmentB) {
+              segments.push({ clipPath: avatarClips.segmentB, startSec: cursor, endSec: cursor + durB1 });
+            }
+            cursor += durB1;
+
+            // Jeda (Talk)
+            if (avatarClips.segmentJeda) {
+              segments.push({ clipPath: avatarClips.segmentJeda, startSec: cursor, endSec: cursor + durJeda });
+            }
+            cursor += durJeda;
+
+            // B2 (Idle)
+            if (avatarClips.segmentB) {
+              segments.push({ clipPath: avatarClips.segmentB, startSec: cursor, endSec: cursor + durB2 - tDur });
+            }
+            cursor += (durB2 - tDur);
+          } else {
+            if (avatarClips.segmentB) {
+              segments.push({ clipPath: avatarClips.segmentB, startSec: cursor, endSec: cursor + (durationMs / 1000) - tDur });
+            }
+            cursor += ((durationMs / 1000) - tDur);
+          }
+
+          if (avatarClips.segmentC) {
+            segments.push({ clipPath: avatarClips.segmentC, startSec: cursor, endSec: cursor + durC - tDur / 2 });
+          }
+        } else {
+          // Full Commentary Mode
+          if (avatarClips.segmentA) {
+            segments.push({ clipPath: avatarClips.segmentA, startSec: 0, endSec: durationMs / 1000 });
+          }
         }
-        const segments: Array<{ clipPath: string; startSec: number; endSec: number }> = [];
-        let cursor = 0;
-        if (avatarClips.segmentA) {
-          segments.push({ clipPath: avatarClips.segmentA, startSec: cursor, endSec: cursor + avatarSegASec });
-        }
-        cursor += avatarSegASec;
-        if (avatarClips.segmentB) {
-          segments.push({ clipPath: avatarClips.segmentB, startSec: cursor, endSec: cursor + avatarSegBSec });
-        }
-        cursor += avatarSegBSec;
-        if (avatarClips.segmentC) {
-          segments.push({ clipPath: avatarClips.segmentC, startSec: cursor, endSec: cursor + avatarSegCSec });
-        }
+
         await this.compositor.composite({ inputVideoPath: outputPath, avatar: req.avatar, segments });
-        log.info({ avatarSegASec, avatarSegBSec, avatarSegCSec }, 'Avatar overlay composited successfully');
+        log.info({ avatarClipsCount: segments.length }, 'Avatar overlay composited successfully with mid-scene sync');
       } catch (compErr) {
         avatarErrorMsg = compErr instanceof Error ? compErr.message : String(compErr);
         log.error({ compErr }, 'Avatar compositing failed; keeping original commentary video');

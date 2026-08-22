@@ -87,10 +87,17 @@ export class Uploader {
       statusObj.publishAt = req.publishAt;
     }
 
+    const rawTags = req.tags || [];
+    const formattedTags = Array.from(new Set([
+      ...rawTags,
+      'Shorts',
+      ...(req.hasAlteredOrSyntheticContent ? ['SyntheticMedia', 'AICommentary'] : []),
+    ]));
+
     const snippetObj: any = {
       title:       req.title       || 'AI Short',
       description: req.description || '',
-      tags:        req.tags        || [],
+      tags:        formattedTags,
       categoryId:  req.categoryId  || '22',
     };
 

@@ -57,8 +57,16 @@ const FONT_OPTIONS: CaptionFont[] = [
   'Lilita One',
   'Bangers',
   'Bebas Neue',
-  'Fredoka One'
+  'Fredoka One',
+  'System'
 ];
+
+export function getFontFamily(font: CaptionFont | string): string {
+  if (font === 'System' || font === 'system') {
+    return 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  }
+  return font;
+}
 const ANIMATION_OPTIONS: { value: CaptionAnimation; label: string }[] = [
   { value: 'none',     label: 'None'     },
   { value: 'fade',     label: 'Fade'     },
@@ -168,9 +176,11 @@ function CaptionLivePreview({
       ].filter(Boolean).join(', ')
     : undefined;
 
+  const isShake = caption.shakeEffect ?? true;
+
   const animClass =
     caption.animation === 'fade'     ? 'animate-fade-in' :
-    caption.animation === 'pop'      ? 'animate-bounce'  :
+    caption.animation === 'pop'      ? (!isShake ? 'animate-bounce' : '') :
     caption.animation === 'slide-up' ? 'animate-slide-up-caption' :
     '';
 
@@ -179,29 +189,33 @@ function CaptionLivePreview({
       <div className={cn('absolute px-2', animClass)} style={positionStyle}>
         {displayGroups.map((group, gi) => (
           <div key={gi} className="leading-tight">
-            {caption.presetId === 'karaoke' ? (
+            {caption.karaokeHighlight || caption.presetId === 'karaoke' || caption.presetId === 'tiktok' ? (
               <span>
-                {group.map((word, wi) => (
-                  <span
-                    key={wi}
-                    style={{
-                      fontFamily:  caption.font,
-                      fontSize:    scaledFontSize,
-                      fontWeight:  caption.bold ? 'bold' : 'normal',
-                      color:       wi === 0 ? caption.highlightColor : caption.primaryColor,
-                      textShadow,
-                      display:     'inline',
-                      marginRight: wi < group.length - 1 ? `${Math.round(4 * scale)}px` : 0,
-                    }}
-                  >
-                    {word}
-                  </span>
-                ))}
+                {group.map((word, wi) => {
+                  const isHighlighted = wi === 0;
+                  return (
+                    <span
+                      key={wi}
+                      className={cn('inline-block', isHighlighted && isShake && 'animate-caption-shake')}
+                      style={{
+                        fontFamily:  getFontFamily(caption.font),
+                        fontSize:    scaledFontSize,
+                        fontWeight:  caption.bold ? 'bold' : 'normal',
+                        color:       isHighlighted ? caption.highlightColor : caption.primaryColor,
+                        textShadow,
+                        marginRight: wi < group.length - 1 ? `${Math.round(4 * scale)}px` : 0,
+                      }}
+                    >
+                      {word}
+                    </span>
+                  );
+                })}
               </span>
             ) : (
               <span
+                className={cn('inline-block', isShake && 'animate-caption-shake')}
                 style={{
-                  fontFamily: caption.font,
+                  fontFamily: getFontFamily(caption.font),
                   fontSize:   scaledFontSize,
                   fontWeight: caption.bold ? 'bold' : 'normal',
                   color:      caption.primaryColor,
@@ -275,6 +289,65 @@ function LogoLivePreview({
         alt=""
         style={{ ...posStyle, opacity: logo.opacity }}
       />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Title live preview overlay
+// ---------------------------------------------------------------------------
+
+function TitleLivePreview({
+  titleOverlay,
+  containerWidth,
+  containerHeight,
+}: {
+  titleOverlay: TitleOverlay;
+  containerWidth: number;
+  containerHeight: number;
+}) {
+  if (!titleOverlay || !titleOverlay.text.trim()) return null;
+
+  const scaleX = containerWidth  / CANVAS_W;
+  const scaleY = containerHeight / CANVAS_H;
+  const scale  = Math.min(scaleX, scaleY);
+
+  const scaledFontSize = Math.round(titleOverlay.fontSize * scale * 0.73);
+  const scaledOutline  = Math.max(0, Math.round(titleOverlay.outlineSize * scale));
+  const outlineColor   = titleOverlay.outlineColor;
+
+  const textShadow = scaledOutline > 0
+    ? [
+        `${scaledOutline}px 0 0 ${outlineColor}`,
+        `-${scaledOutline}px 0 0 ${outlineColor}`,
+        `0 ${scaledOutline}px 0 ${outlineColor}`,
+        `0 -${scaledOutline}px 0 ${outlineColor}`,
+        `${scaledOutline}px ${scaledOutline}px 0 ${outlineColor}`,
+        `-${scaledOutline}px -${scaledOutline}px 0 ${outlineColor}`,
+        `${scaledOutline}px -${scaledOutline}px 0 ${outlineColor}`,
+        `-${scaledOutline}px ${scaledOutline}px 0 ${outlineColor}`,
+      ].join(', ')
+    : undefined;
+
+  const text = titleOverlay.uppercase ? titleOverlay.text.toUpperCase() : titleOverlay.text;
+  const topPx = Math.round(titleOverlay.y * scaleY);
+
+  return (
+    <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
+      <div
+        className="absolute left-0 right-0 px-4 text-center leading-tight whitespace-pre-wrap"
+        style={{
+          top: topPx,
+          transform: 'translateY(-100%)', // ASS \an2 anchor (bottom-center)
+          fontFamily: getFontFamily(titleOverlay.font),
+          fontSize: scaledFontSize,
+          fontWeight: titleOverlay.bold ? 'bold' : 'normal',
+          color: titleOverlay.color,
+          textShadow,
+        }}
+      >
+        {text}
+      </div>
     </div>
   );
 }
@@ -986,8 +1059,8 @@ export function ClipPreviewPanel({ clip, hookId, projectId, words: initialWords,
         letterboxBg:         layoutPreset === 'letterbox' ? letterboxBg   : undefined,
         logoOverlay:         logo ?? undefined,
         titleOverlay:        titleOverlay ?? undefined,
-        zoomEnabled,
-        trackingMode:        zoomEnabled ? trackingMode : 'none',
+        zoomEnabled:         trackingMode !== 'none' ? zoomEnabled : false,
+        trackingMode:        trackingMode !== 'none' && (trackingMode !== 'auto' || zoomEnabled) ? trackingMode : 'none',
         subjectBbox:         trackingMode === 'manual' && selectedBbox ? selectedBbox : undefined,
         subjectSeedMs:       trackingMode === 'manual' && selectedBbox ? pickerTimestampMs : undefined,
         overrideWords,
@@ -1086,7 +1159,8 @@ export function ClipPreviewPanel({ clip, hookId, projectId, words: initialWords,
       // Draw custom hook text overlay
       if (designerText.trim()) {
         ctx.save();
-        ctx.font = `${designerBold ? 'bold ' : ''}${designerFontSize}px ${designerFont}`;
+        const fontName = getFontFamily(designerFont);
+        ctx.font = `${designerBold ? 'bold ' : ''}${designerFontSize}px ${fontName}`;
         ctx.fillStyle = designerColor;
         ctx.strokeStyle = designerOutlineColor;
         ctx.lineWidth = designerOutlineSize * 2;
@@ -1530,6 +1604,15 @@ export function ClipPreviewPanel({ clip, hookId, projectId, words: initialWords,
               />
             )}
 
+            {/* Live title overlay preview — only shown when no rendered preview available yet */}
+            {hookId && !isProcessing && !renderedPreview && titleOverlay && (
+              <TitleLivePreview
+                titleOverlay={titleOverlay}
+                containerWidth={containerSize.w}
+                containerHeight={containerSize.h}
+              />
+            )}
+
             {/* YouTube Shorts Frame & Safe Zone Overlay */}
             {hookId && !isProcessing && showYtFrame && (
               <YouTubeShortsOverlay showSafeZone={showSafeZone} />
@@ -1863,6 +1946,11 @@ export function ClipPreviewPanel({ clip, hookId, projectId, words: initialWords,
                     type="button"
                     onClick={() => {
                       setTrackingMode(mode);
+                      if (mode !== 'none') {
+                        setZoomEnabled(true);
+                      } else {
+                        setZoomEnabled(false);
+                      }
                       if (mode !== 'manual') setSelectedBbox(null);
                     }}
                     className={cn(

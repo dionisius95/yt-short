@@ -13,7 +13,8 @@ import { BrowserWindow } from 'electron';
 import { CHANNELS } from '../ipc/channels';
 import { createLogger } from '../utils/logger';
 import { Tracker } from './Tracker';
-import type { TranscriptWord, SubtitleStyle, SubtitlePosition, CropFrame, CaptionStyle, CaptionPresetId, LogoOverlay, LayoutPreset, SplitLayout, GameRatio, GamePosition, LetterboxBackground, TitleOverlay, CommentatorTransitionEffect } from '../../shared/types';
+import { BrollManager } from './BrollManager';
+import type { TranscriptWord, SubtitleStyle, SubtitlePosition, CropFrame, CaptionStyle, CaptionPresetId, LogoOverlay, LayoutPreset, SplitLayout, GameRatio, GamePosition, LetterboxBackground, TitleOverlay, CommentatorTransitionEffect, BrollConfig } from '../../shared/types';
 import { CAPTION_PRESETS } from '../../shared/types';
 
 const log = createLogger('Processor');
@@ -352,29 +353,37 @@ function buildCropFilter(
 
   const keyframes = useFrames.map((f) => {
     const tSec = Math.max(0, f.timestampMs / 1000 - clipStartSec);
-    return { t: tSec, x: computeCropX(f), y: computeCropY(f) };
+    return { t: tSec, x: computeCropX(f), y: computeCropY(f), isCut: f.isCut ?? false };
   });
 
   keyframes.sort((a, b) => a.t - b.t);
 
   // Ensure crop starts at t=0
   if (keyframes[0].t > 0.05) {
-    keyframes.unshift({ t: 0, x: keyframes[0].x, y: keyframes[0].y });
+    keyframes.unshift({ t: 0, x: keyframes[0].x, y: keyframes[0].y, isCut: false });
   }
 
-  // Cap at 30 keyframes to avoid FFmpeg expression depth overflow
+  // Cap at 30 keyframes to avoid FFmpeg expression depth overflow, preserving scene cuts
   const MAX_KEYFRAMES = 30;
   if (keyframes.length > MAX_KEYFRAMES) {
+    const cutIndices = new Set(keyframes.map((k, idx) => k.isCut ? idx : -1).filter((idx) => idx >= 0));
     const step = (keyframes.length - 1) / (MAX_KEYFRAMES - 1);
-    const sampled: typeof keyframes = [];
+    const sampledMap = new Map<number, typeof keyframes[0]>();
     for (let i = 0; i < MAX_KEYFRAMES; i++) {
-      sampled.push(keyframes[Math.round(i * step)]);
+      const idx = Math.round(i * step);
+      sampledMap.set(idx, keyframes[idx]);
     }
+    for (const cutIdx of cutIndices) {
+      sampledMap.set(cutIdx, keyframes[cutIdx]);
+    }
+    const sampled = Array.from(sampledMap.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map((entry) => entry[1]);
     keyframes.length = 0;
-    keyframes.push(...sampled);
+    keyframes.push(...sampled.slice(0, MAX_KEYFRAMES + 6));
   }
 
-  // ── Build FFmpeg piecewise-linear expression for X and Y ─────────────────
+  // ── Build FFmpeg piecewise-linear expression for X and Y with hard-cut support ─────────────────
   function buildLerpExpr(axis: 'x' | 'y'): string {
     if (keyframes.length <= 1) return String(keyframes[0]?.[axis] ?? 0);
 
@@ -387,7 +396,8 @@ function buildCropFilter(
       const dv = k1[axis] - k0[axis];
 
       let segExpr: string;
-      if (dt < 0.001 || dv === 0) {
+      if (dt < 0.001 || dv === 0 || k1.isCut) {
+        // Hard step jump on scene cut or zero duration
         segExpr = String(k0[axis]);
       } else {
         segExpr = `${k0[axis]}+${dv}*(min(max(t\\,${k0.t.toFixed(3)})\\,${k1.t.toFixed(3)})-${k0.t.toFixed(3)})/${dt.toFixed(3)}`;
@@ -1027,8 +1037,12 @@ function buildTitleEvents(
     return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
   };
 
+  const fontName = (title.font === 'System' || (title.font as string) === 'system')
+    ? (process.platform === 'win32' ? 'Segoe UI' : 'Arial')
+    : title.font;
+
   const styleLine =
-    `Style: Title,${title.font},${title.fontSize},${primaryAss},&H000000FF,${outlineAss},${backAss},${bold},0,0,0,100,100,1,0,1,${title.outlineSize},0,2,60,60,0,1`;
+    `Style: Title,${fontName},${title.fontSize},${primaryAss},&H000000FF,${outlineAss},${backAss},${bold},0,0,0,100,100,1,0,1,${title.outlineSize},0,2,60,60,0,1`;
 
   const posTag     = `{\\an2\\pos(540,${title.y})}`;
   const dialogueLine = `Dialogue: 1,${fmt(0)},${fmt(durationMs)},Title,,0,0,0,,${posTag}${text}`;
@@ -1104,17 +1118,9 @@ function hexToAss(hex: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Analyse per-word loudness by running FFmpeg `astats` over each word's
- * audio segment.  Returns a Set of word indices (relative to the clip word
- * array) whose RMS loudness exceeds `thresholdDb`.
- *
- * Falls back to an empty Set on any error so caption generation is never
- * blocked by an audio-analysis failure.
- *
- * @param sourceFile   Path to the source video/audio file.
- * @param clipWords    Words already offset to clip-relative time (ms).
- * @param thresholdDb  RMS loudness threshold in dB (default −18 dB).
- *                     Higher (less negative) = only the very loudest words.
+ * Analyse per-word loudness using a single-pass 8kHz PCM audio extraction.
+ * Returns a Set of word indices whose RMS loudness exceeds dynamic threshold.
+ * Works instantaneously for any number of words without spawning multiple processes.
  */
 async function detectLoudWords(
   sourceFile: string,
@@ -1123,79 +1129,73 @@ async function detectLoudWords(
   thresholdDb = -18,
 ): Promise<Set<number>> {
   const loudIndices = new Set<number>();
-
-  // Limit to avoid spawning too many processes on Windows
-  if (clipWords.length > 40) {
-    log.info({ wordCount: clipWords.length }, 'Skipping loudness detection: too many words');
+  if (!fs.existsSync(sourceFile) || clipWords.length === 0) {
     return loudIndices;
   }
 
+  try {
+    const SAMPLE_RATE = 8000;
+    const clipStartSec = Math.max(0, clipStartMs / 1000);
+    const maxEndMs = Math.max(...clipWords.map((w) => w.endMs));
+    const durSec = Math.max(1, Math.ceil(maxEndMs / 1000) + 1);
 
-  // Batch: one FFmpeg call per word would be too slow.
-  // Instead run a single pass over the full clip and sample RMS per word
-  // using the `astats=metadata=1:reset=1` filter with `-af` select.
-  // We use a simpler approach: for each word, run a quick FFmpeg probe
-  // extracting mean_volume from `volumedetect`.  We limit to words longer
-  // than 100 ms to avoid micro-words inflating results.
+    const pcmBuffer = await new Promise<Buffer>((resolve) => {
+      const proc = spawn('ffmpeg', [
+        '-ss', String(clipStartSec),
+        '-t',  String(durSec),
+        '-i',  sourceFile,
+        '-vn',
+        '-ac', '1',
+        '-ar', String(SAMPLE_RATE),
+        '-f',  's16le',
+        '-',
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
 
-  const candidates = clipWords
-    .map((w, i) => ({ i, startMs: w.startMs, endMs: w.endMs }))
-    .filter(({ startMs, endMs }) => endMs - startMs >= 100);
+      const chunks: any[] = [];
+      proc.stdout?.on('data', (c: any) => chunks.push(c));
+      proc.on('close', () => resolve(Buffer.concat(chunks)));
+      proc.on('error', () => resolve(Buffer.alloc(0)));
+      setTimeout(() => { proc.kill(); resolve(Buffer.alloc(0)); }, 10_000);
+    });
 
-  const results: Array<{ i: number; db: number }> = [];
+    if (pcmBuffer.length < 100) return loudIndices;
 
-  // Run all probes in parallel (capped at 8 concurrent) for speed
-  const CONCURRENCY = 8;
-  for (let batch = 0; batch < candidates.length; batch += CONCURRENCY) {
-    const chunk = candidates.slice(batch, batch + CONCURRENCY);
+    const totalSamples = Math.floor(pcmBuffer.length / 2);
+    const results: Array<{ i: number; db: number }> = [];
 
-    await Promise.all(chunk.map(async ({ i, startMs, endMs }) => {
-      try {
-        const startSec = (clipStartMs + startMs) / 1000;
-        const durSec   = Math.max(0.1, (endMs - startMs) / 1000);
+    for (let i = 0; i < clipWords.length; i++) {
+      const w = clipWords[i];
+      if (w.endMs - w.startMs < 60) continue;
 
-        const rmsDb = await new Promise<number>((resolve) => {
-          const proc = spawn('ffmpeg', [
-            '-ss',  String(startSec),
-            '-t',   String(durSec),
-            '-i',   sourceFile,
-            '-af',  'volumedetect',
-            '-vn',
-            '-f',   'null', '-',
-          ], { stdio: ['ignore', 'ignore', 'pipe'] });
+      const s0 = Math.max(0, Math.floor((w.startMs / 1000) * SAMPLE_RATE));
+      const s1 = Math.min(totalSamples, Math.ceil((w.endMs / 1000) * SAMPLE_RATE));
+      if (s1 <= s0) continue;
 
-          let stderr = '';
-          proc.stderr?.on('data', (c: Buffer) => { stderr += c.toString(); });
-          proc.on('close', () => {
-            // Parse "mean_volume: -XX.X dB"
-            const m = stderr.match(/mean_volume:\s*([-\d.]+)\s*dB/);
-            resolve(m ? parseFloat(m[1]) : -999);
-          });
-          proc.on('error', () => resolve(-999));
-          // Safety timeout per-word probe
-          setTimeout(() => { proc.kill(); resolve(-999); }, 8_000);
-        });
-
-        if (rmsDb > -900) {
-          results.push({ i, db: rmsDb });
-        }
-      } catch {
-        // Non-fatal — just skip this word
+      let sumSq = 0;
+      for (let s = s0; s < s1; s++) {
+        const val = pcmBuffer.readInt16LE(s * 2) / 32768;
+        sumSq += val * val;
       }
-    }));
-  }
-
-  // Dynamic loudness threshold: select words within 4.0 dB of peak volume in clip OR >= thresholdDb
-  // This ensures shake effect works on normalized TTS voice (which averages -22dB to -26dB) as well as loud video audio
-  if (results.length > 0) {
-    const validDbs = results.map(r => r.db);
-    const maxDb = Math.max(...validDbs);
-    const cutoffDb = Math.min(thresholdDb, maxDb - 4.0);
-    for (const { i, db } of results) {
-      if (db >= cutoffDb) {
-        loudIndices.add(i);
+      const rms = Math.sqrt(sumSq / (s1 - s0));
+      const db = rms > 0 ? 20 * Math.log10(rms) : -99;
+      if (db > -80) {
+        results.push({ i, db });
       }
     }
+
+    if (results.length > 0) {
+      const validDbs = results.map((r) => r.db);
+      const maxDb = Math.max(...validDbs);
+      // Words within 4.5 dB of peak volume in clip OR >= thresholdDb
+      const cutoffDb = Math.min(thresholdDb, maxDb - 4.5);
+      for (const { i, db } of results) {
+        if (db >= cutoffDb) {
+          loudIndices.add(i);
+        }
+      }
+    }
+  } catch (err) {
+    log.warn({ err }, 'Fast loudness detection failed, continuing without shake effect');
   }
 
   return loudIndices;
@@ -1229,7 +1229,7 @@ function basePos(style: CaptionStyle): { x: number; y: number } {
  *   • Loudness-based shake effect        (multiple \pos sub-events)
  *   • Karaoke highlight preserved
  */
-async function buildAssSubtitles(
+export async function buildAssSubtitles(
   words: TranscriptWord[],
   startMs: number,
   endMs: number,
@@ -1252,22 +1252,53 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
   }
 
-  // Filter words within clip range, offset to clip-relative time
-  const clipWords = words
-    .filter((w) => w.startMs < endMs && w.endMs > startMs)
-    .map((w) => ({
-      ...w,
-      startMs: Math.max(0, w.startMs - startMs),
-      endMs: Math.min(endMs - startMs, w.endMs - startMs)
-    }));
+  // 1. Filter and offset words to clip-relative time
+  const rawClipWords: Array<{ word: string; startMs: number; endMs: number }> = [];
+  for (const w of words) {
+    if (!w || !w.word || !w.word.trim()) continue;
+    if (w.endMs <= startMs || w.startMs >= endMs) continue;
 
-  // ── Loudness detection ────────────────────────────────────────────────────
-  let loudSet = new Set<number>();
-  if (sourceFile && style.shakeEffect !== false) {
-    try {
-      loudSet = await detectLoudWords(sourceFile, clipWords, startMs);
-    } catch {
-      // Non-fatal — continue without shake effect
+    const s = Math.max(0, w.startMs - startMs);
+    const clampedEnd = Math.min(w.endMs, w.startMs + 3500);
+    const e = Math.min(endMs - startMs, Math.max(clampedEnd - startMs, s + 50));
+    if (e > s) {
+      rawClipWords.push({
+        word: w.word.trim(),
+        startMs: s,
+        endMs: e,
+      });
+    }
+  }
+
+  // Sort chronologically
+  rawClipWords.sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
+
+  // 2. De-overlap consecutive words (clean chronological chain, zero overlaps)
+  const clipWords: Array<{ word: string; startMs: number; endMs: number }> = [];
+  for (const w of rawClipWords) {
+    if (clipWords.length === 0) {
+      clipWords.push(w);
+      continue;
+    }
+    const prev = clipWords[clipWords.length - 1];
+
+    if (w.startMs < prev.startMs) {
+      w.startMs = prev.startMs;
+    }
+
+    if (prev.endMs > w.startMs) {
+      if (w.startMs > prev.startMs + 50) {
+        prev.endMs = w.startMs;
+      } else {
+        w.startMs = prev.endMs;
+        if (w.endMs <= w.startMs) {
+          w.endMs = w.startMs + 60;
+        }
+      }
+    }
+
+    if (w.endMs > w.startMs) {
+      clipWords.push(w);
     }
   }
 
@@ -1276,8 +1307,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   const highlightAss = hexToAss(style.highlightColor);
   const backAss      = '&H80000000';
 
-  // When captionY is set: use alignment 2 (bottom-center) so \pos Y = bottom edge of text.
-  // When using preset positions: keep original alignment so MarginV works correctly.
   const alignment = style.captionY !== undefined
     ? 2  // bottom-center anchor, position via \pos
     : style.position === 'lower-third' ? 2
@@ -1289,6 +1318,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     : style.position === 'upper-third' ? 120
     : 0;
 
+  const fontName = (style.font === 'System' || (style.font as string) === 'system')
+    ? (process.platform === 'win32' ? 'Segoe UI' : 'Arial')
+    : style.font;
+
   const header = `[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -1297,11 +1330,25 @@ WrapStyle: 1
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,${style.font},${style.fontSize},${primaryAss},&H000000FF,${outlineAss},${backAss},${style.bold ? 1 : 0},0,0,0,100,100,1,0,1,${style.outlineSize},${style.shadowSize},${alignment},60,60,${marginV},1
+Style: Default,${fontName},${style.fontSize},${primaryAss},&H000000FF,${outlineAss},${backAss},${style.bold ? 1 : 0},0,0,0,100,100,1,0,1,${style.outlineSize},${style.shadowSize},${alignment},60,60,${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
+
+  if (clipWords.length === 0) {
+    return header;
+  }
+
+  // ── Loudness detection ────────────────────────────────────────────────────
+  let loudSet = new Set<number>();
+  if (sourceFile && style.shakeEffect !== false) {
+    try {
+      loudSet = await detectLoudWords(sourceFile, clipWords, startMs);
+    } catch {
+      // Non-fatal — continue without shake effect
+    }
+  }
 
   const fmt = (ms: number): string => {
     const h  = Math.floor(ms / 3_600_000);
@@ -1311,160 +1358,196 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
   };
 
-  // ── Deterministic pseudo-random for shake offsets (seeded per word index) ──
-  // Using a simple LCG so shake pattern is consistent across re-renders.
   function lcgRand(seed: number): () => number {
     let s = seed;
     return () => {
       s = (s * 1664525 + 1013904223) & 0xffffffff;
-      return (s >>> 0) / 0xffffffff; // [0, 1)
+      return (s >>> 0) / 0xffffffff;
     };
   }
 
   const dialogueLines: string[] = [];
   const { x: baseX, y: baseY } = basePos(style);
+  const wordsPerLine = Math.max(1, style.lines || 1);
+  const MAX_GROUP_GAP_MS = 600; // split group if pause between words > 600ms
+  const isShakeEnabled = style.shakeEffect !== false;
 
-  // ── Karaoke: group words into lines, render background + foreground layers ──
-  // Background layer (Layer 0): full group visible in primaryColor for entire group duration.
-  // Foreground layer (Layer 1): active word only in highlightColor + bouncy anim.
-  // Non-karaoke: pure word-level events (already correct).
+  // 3. Intelligent grouping into visual lines
+  const groups: Array<Array<{ word: string; startMs: number; endMs: number; wordIdx: number }>> = [];
+  let currentGroup: Array<{ word: string; startMs: number; endMs: number; wordIdx: number }> = [];
+
+  for (let i = 0; i < clipWords.length; i++) {
+    const w = { ...clipWords[i], wordIdx: i };
+    if (currentGroup.length === 0) {
+      currentGroup.push(w);
+      continue;
+    }
+
+    const prevW = currentGroup[currentGroup.length - 1];
+    const gap = w.startMs - prevW.endMs;
+
+    const isTerminal = /[.!?]$/.test(prevW.word.trim()) && gap > 200;
+    const isLargeGap = gap > MAX_GROUP_GAP_MS;
+    const isFull = currentGroup.length >= wordsPerLine;
+
+    if (isFull || isLargeGap || isTerminal) {
+      groups.push(currentGroup);
+      currentGroup = [w];
+    } else {
+      currentGroup.push(w);
+    }
+  }
+  if (currentGroup.length > 0) {
+    groups.push(currentGroup);
+  }
+
+  const clipDurationMs = endMs - startMs;
+  const MIN_HOLD_MS = 500; // minimum duration (ms) a subtitle line stays on screen
+  const GAP_BRIDGE_MS = 750; // bridge natural pauses under 750ms to eliminate subtitle blinking
 
   if (style.karaokeHighlight) {
-    // ASS karaoke approach yang reliable di libass:
-    // Style header: PrimaryColour = highlightColor (active word color)
-    //               SecondaryColour = primaryColor (pre-active / already-spoken color)
-    // Use \kf tag: sweeps from SecondaryColour → PrimaryColour during word duration.
-    // After word done: stays PrimaryColour (highlight).
-    // But we want SPOKEN words to revert to primaryColor, not stay highlighted.
-    // Use \k (not \kf): before word = SecondaryColour, during = SecondaryColour, after = PrimaryColour.
-    // So: SecondaryColour = primaryColor (idle), PrimaryColour = highlightColor (spoken).
-    // Active word during its \k window = SecondaryColour = primary (not what we want).
-    //
-    // Correct approach for "active=highlight, rest=primary":
-    // Use \K tag: wipe fill. Or use per-event override with \1c.
-    //
-    // Simplest proven approach: separate Dialogue per word (word-level events),
-    // BUT also show the rest of the group as background using \1c primary on same layer.
-    // Avoid double render: use Layer 0 for background group (all primary),
-    // Layer 1 for active word ONLY (highlight + bouncy) — but CLIP the background
-    // word text so it doesn't double-render the active word.
-    //
-    // Cleanest: one Dialogue per WORD, not per group.
-    // Show group context by rendering ALL words of the group for each word's duration,
-    // with active word = highlight, rest = primary.
-    // This means N events per group of N words, each showing the full group text
-    // but with different word highlighted.
+    // ── Karaoke Highlight Mode ──────────────────────────────────────────────
+    for (let gi = 0; gi < groups.length; gi++) {
+      const group = groups[gi];
+      const nextGroupStart = gi + 1 < groups.length ? groups[gi + 1][0].startMs : clipDurationMs;
 
-    const wordsPerLine = style.lines;
+      const grpStart = group[0].startMs;
+      const rawGrpEnd = group[group.length - 1].endMs;
+      let grpEnd: number;
+      if (nextGroupStart - rawGrpEnd <= GAP_BRIDGE_MS) {
+        // Seamless bridge across speaking pause — zero blink
+        grpEnd = nextGroupStart;
+      } else {
+        // Long silence/pause: hold for minimum readability before disappearing
+        grpEnd = Math.min(nextGroupStart, Math.max(rawGrpEnd + 400, grpStart + MIN_HOLD_MS));
+      }
 
-    for (let gi = 0; gi < clipWords.length; gi += wordsPerLine) {
-      const group = clipWords.slice(gi, gi + wordsPerLine).filter((w) => w.word.trim());
-      if (group.length === 0) continue;
-
-      // For each word in group, emit one Dialogue spanning that word's duration,
-      // showing the full group with active word in highlightColor, others in primaryColor.
       for (let wi = 0; wi < group.length; wi++) {
         const activeWord = group[wi];
+
+        // Start time for this word's active highlight
+        const evStart = wi === 0
+          ? grpStart
+          : (group[wi].startMs > group[wi - 1].endMs ? group[wi].startMs : group[wi - 1].endMs);
+
+        // End time for this word's active highlight (bridge gap to next word in group so subtitle line doesn't blink off)
+        let evEnd: number;
+        if (wi < group.length - 1) {
+          const nextWordStart = group[wi + 1].startMs;
+          evEnd = Math.min(Math.max(activeWord.endMs, nextWordStart), nextGroupStart);
+        } else {
+          evEnd = grpEnd;
+        }
+
+        const safeStart = Math.max(0, evStart);
+        const safeEnd = Math.max(safeStart + 40, evEnd);
+        const isLoud = isShakeEnabled && loudSet.has(activeWord.wordIdx);
+
         const lineText = group.map((w, j) => {
           const wt = style.uppercase ? w.word.trim().toUpperCase() : w.word.trim();
           if (j === wi) {
-            // Active word: highlight color + bouncy scale animation
-            const isLoud = loudSet.has(gi + wi);
             const bouncyTag = isLoud
               ? '{\\t(0,80,\\fscx115\\fscy115)\\t(80,180,\\fscx100\\fscy100)}'
               : '{\\t(0,80,\\fscx110\\fscy110)\\t(80,160,\\fscx100\\fscy100)}';
             return `{\\1c${highlightAss}}${bouncyTag}${wt}`;
           }
-          // Other words: primary color, reset scale
           return `{\\1c${primaryAss}}{\\fscx100\\fscy100}${wt}`;
         }).join(' ');
 
-        const animPrefix = style.animation === 'fade' ? '{\\fad(150,150)}' : '';
-        const posTag = style.captionY !== undefined ? `{\\pos(${baseX},${baseY})}` : '';
-        const text = `${animPrefix}{\\an${alignment}}${posTag}${lineText}`;
+        const animPrefix = style.animation === 'fade' ? '{\\fad(100,100)}' : '';
 
-        dialogueLines.push(
-          `Dialogue: 0,${fmt(activeWord.startMs)},${fmt(activeWord.endMs)},Default,,0,0,0,,${text}`
-        );
+        if (isLoud) {
+          // Micro-segment camera shake during loud word highlight
+          const SHAKE_INTERVAL_MS = 35;
+          const SHAKE_AMPLITUDE = 12;
+          const rand = lcgRand(activeWord.wordIdx * 7919);
+
+          for (let t = safeStart; t < safeEnd; t += SHAKE_INTERVAL_MS) {
+            const segS = t;
+            const segE = Math.min(t + SHAKE_INTERVAL_MS, safeEnd);
+            const dx = Math.round((rand() * 2 - 1) * SHAKE_AMPLITUDE);
+            const dy = Math.round((rand() * 2 - 1) * SHAKE_AMPLITUDE);
+            const posTag = `{\\pos(${baseX + dx},${baseY + dy})}`;
+            const text = `${animPrefix}{\\an${alignment}}${posTag}${lineText}`;
+            dialogueLines.push(
+              `Dialogue: 0,${fmt(segS)},${fmt(segE)},Default,,0,0,0,,${text}`
+            );
+          }
+        } else {
+          const posTag = style.captionY !== undefined ? `{\\pos(${baseX},${baseY})}` : '';
+          const text = `${animPrefix}{\\an${alignment}}${posTag}${lineText}`;
+          dialogueLines.push(
+            `Dialogue: 0,${fmt(safeStart)},${fmt(safeEnd)},Default,,0,0,0,,${text}`
+          );
+        }
       }
     }
+  } else {
+    // ── Non-Karaoke Mode ───────────────────────────────────────────────────
+    for (let gi = 0; gi < groups.length; gi++) {
+      const group = groups[gi];
+      const nextGroupStart = gi + 1 < groups.length ? groups[gi + 1][0].startMs : clipDurationMs;
 
-    return header + dialogueLines.join('\n') + '\n';
-  }
+      const grpStart = group[0].startMs;
+      const rawGrpEnd = group[group.length - 1].endMs;
+      let grpEnd: number;
+      if (nextGroupStart - rawGrpEnd <= GAP_BRIDGE_MS) {
+        grpEnd = nextGroupStart;
+      } else {
+        grpEnd = Math.min(nextGroupStart, Math.max(rawGrpEnd + 400, grpStart + MIN_HOLD_MS));
+      }
 
-  // ── Word-level event generation (non-karaoke) ─────────────────────────────
-  for (let i = 0; i < clipWords.length; i++) {
-    const w = clipWords[i];
-    if (!w.word.trim()) continue;
+      const safeStart = Math.max(0, grpStart);
+      const safeEnd = Math.max(safeStart + 40, grpEnd);
 
-    const wordText = style.uppercase ? w.word.trim().toUpperCase() : w.word.trim();
-    const isLoud   = loudSet.has(i);
+      const isAnyLoud = isShakeEnabled && group.some((w) => loudSet.has(w.wordIdx));
+      const groupText = group
+        .map((w) => (style.uppercase ? w.word.trim().toUpperCase() : w.word.trim()))
+        .join(' ');
 
-    // ── Color tag ────────────────────────────────────────────────────────────
-    // Non-karaoke path only (karaoke handled above with early return).
-    let colorTag: string;
-    if (style.highlightColor !== style.primaryColor) {
-      colorTag = `{\\1c${highlightAss}}`;
-    } else {
-      colorTag = `{\\1c${primaryAss}}`;
-    }
+      const colorTag = style.highlightColor !== style.primaryColor
+        ? `{\\1c${highlightAss}}`
+        : `{\\1c${primaryAss}}`;
 
-    // ── Bouncy pop-up animation ─────────────────────────────────────────────
-    // Subtle bounce: scale from 100%→110%→100%. Starts visible, just bounces.
-    // Loud words: slightly more aggressive bounce 100%→115%→100%.
-    let bouncyTag: string;
-    if (isLoud) {
-      bouncyTag = '{\\t(0,80,\\fscx115\\fscy115)\\t(80,180,\\fscx100\\fscy100)}';
-    } else {
-      bouncyTag = '{\\t(0,80,\\fscx110\\fscy110)\\t(80,160,\\fscx100\\fscy100)}';
-    }
+      const bouncyTag = isAnyLoud
+        ? '{\\t(0,80,\\fscx115\\fscy115)\\t(80,180,\\fscx100\\fscy100)}'
+        : style.animation === 'pop'
+        ? '{\\t(0,80,\\fscx110\\fscy110)\\t(80,160,\\fscx100\\fscy100)}'
+        : '';
 
-    // ── Slide-up / fade animation ────────────────────────────────────────────
-    let extraAnimTag = '';
-    if (style.animation === 'fade') {
-      extraAnimTag = '{\\fad(150,150)}';
-    } else if (style.animation === 'slide-up') {
-      const slideFromY = baseY + 100;
-      extraAnimTag = `{\\move(${baseX},${slideFromY},${baseX},${baseY},0,200)}`;
-    }
-    // 'pop' = bouncyTag above (always active)
+      let extraAnimTag = '';
+      if (style.animation === 'fade') {
+        extraAnimTag = '{\\fad(150,150)}';
+      } else if (style.animation === 'slide-up') {
+        const slideFromY = baseY + 100;
+        extraAnimTag = `{\\move(${baseX},${slideFromY},${baseX},${baseY},0,200)}`;
+      }
 
-    if (!isLoud) {
-      // ── Normal word: single dialogue event ───────────────────────────────
       const anTag = `{\\an${alignment}}`;
-      // When captionY set: add explicit \pos so position is exact, not margin-driven
-      const posTag = style.captionY !== undefined ? `{\\pos(${baseX},${baseY})}` : '';
-      const text = `${anTag}${posTag}${bouncyTag}${colorTag}${extraAnimTag}${wordText}`;
-      dialogueLines.push(
-        `Dialogue: 0,${fmt(w.startMs)},${fmt(w.endMs)},Default,,0,0,0,,${text}`
-      );
-    } else {
-      // ── Loud word: shake effect via multiple \pos sub-events ──────────────
-      // Split the word duration into 30 ms micro-segments; each segment gets
-      // a slightly randomised \pos offset to simulate camera shake.
-      const SHAKE_INTERVAL_MS = 30;
-      const SHAKE_AMPLITUDE   = 12; // max pixel offset from base position
-      const rand = lcgRand(i * 7919); // deterministic seed per word
 
-      const segments: Array<{ sMs: number; eMs: number }> = [];
-      for (let t = w.startMs; t < w.endMs; t += SHAKE_INTERVAL_MS) {
-        segments.push({ sMs: t, eMs: Math.min(t + SHAKE_INTERVAL_MS, w.endMs) });
-      }
+      if (isAnyLoud) {
+        const SHAKE_INTERVAL_MS = 35;
+        const SHAKE_AMPLITUDE = 12;
+        const rand = lcgRand(group[0].wordIdx * 7919);
 
-      segments.forEach((seg, si) => {
-        // First sub-event gets the bouncy pop-up; the rest skip it to avoid
-        // retriggering the scale animation on every micro-segment.
-        const popTag = si === 0 ? bouncyTag : '{\\fscx100\\fscy100}';
-
-        const dx = Math.round((rand() * 2 - 1) * SHAKE_AMPLITUDE);
-        const dy = Math.round((rand() * 2 - 1) * SHAKE_AMPLITUDE);
-        const posTag = `{\\an${alignment}\\pos(${baseX + dx},${baseY + dy})}`;
-
-        const text = `${popTag}${posTag}${colorTag}${wordText}`;
+        for (let t = safeStart; t < safeEnd; t += SHAKE_INTERVAL_MS) {
+          const segS = t;
+          const segE = Math.min(t + SHAKE_INTERVAL_MS, safeEnd);
+          const dx = Math.round((rand() * 2 - 1) * SHAKE_AMPLITUDE);
+          const dy = Math.round((rand() * 2 - 1) * SHAKE_AMPLITUDE);
+          const posTag = `{\\pos(${baseX + dx},${baseY + dy})}`;
+          const text = `${anTag}${posTag}${bouncyTag}${colorTag}${extraAnimTag}${groupText}`;
+          dialogueLines.push(
+            `Dialogue: 0,${fmt(segS)},${fmt(segE)},Default,,0,0,0,,${text}`
+          );
+        }
+      } else {
+        const posTag = style.captionY !== undefined ? `{\\pos(${baseX},${baseY})}` : '';
+        const text = `${anTag}${posTag}${bouncyTag}${colorTag}${extraAnimTag}${groupText}`;
         dialogueLines.push(
-          `Dialogue: 0,${fmt(seg.sMs)},${fmt(seg.eMs)},Default,,0,0,0,,${text}`
+          `Dialogue: 0,${fmt(safeStart)},${fmt(safeEnd)},Default,,0,0,0,,${text}`
         );
-      });
+      }
     }
   }
 
@@ -1509,8 +1592,9 @@ export class Processor {
     const { width: srcWidth, height: srcHeight } = getVideoDimensions(sourceFile);
     log.info({ clipId, srcWidth, srcHeight, sourceFile }, 'Source video dimensions');
     const trackingMode = opts.trackingMode ?? 'auto';
+    const shouldTrack = trackingMode !== 'none' && (zoomEnabled || trackingMode === 'speaker' || trackingMode === 'manual' || trackingMode === 'auto');
 
-    if (zoomEnabled && trackingMode !== 'none') {
+    if (shouldTrack) {
       emitProgress(clipId, 10);
 
       // Heartbeat ticker during tracking — keeps progress bar moving
@@ -1683,15 +1767,16 @@ export class Processor {
         log.info({ clipId, lbBg }, 'Using letterbox layout');
         const logo = opts.logoOverlay && fs.existsSync(opts.logoOverlay.filePath)
           ? opts.logoOverlay : undefined;
+        const effectiveCropFilter = (shouldTrack || cropFrames.length > 0) ? cropFilter : undefined;
         const { filterComplex, mapVideo, needsImageInput } = buildLetterboxFilter(
-          assForFfmpeg, lbBg, logo, opts.zoomEnabled ? cropFilter : undefined
+          assForFfmpeg, lbBg, logo, effectiveCropFilter
         );
         const imageInput = needsImageInput && lbBg.imagePath && fs.existsSync(lbBg.imagePath)
           ? ['-i', lbBg.imagePath] : [];
         const logoInput = logo ? ['-i', logo.filePath] : [];
         // If image mode but file missing, fall back to blur
         const effectiveFc = (needsImageInput && imageInput.length === 0)
-          ? buildLetterboxFilter(assForFfmpeg, { ...lbBg, type: 'blur' }, logo, opts.zoomEnabled ? cropFilter : undefined).filterComplex
+          ? buildLetterboxFilter(assForFfmpeg, { ...lbBg, type: 'blur' }, logo, effectiveCropFilter).filterComplex
           : filterComplex;
 
         let replacementAudioIdx = -1;
@@ -2023,7 +2108,8 @@ export class Processor {
 
     try {
       let cropFrames: CropFrame[] = [];
-      if (zoomEnabled) {
+      const shouldTrack = trackingMode !== 'none' && (zoomEnabled || trackingMode === 'speaker' || trackingMode === 'manual' || trackingMode === 'auto');
+      if (shouldTrack) {
         try {
           if (trackingMode === 'speaker') {
             cropFrames = await this._detectActiveSpeaker(sourceFile, startMs, endMs, subjectBbox);
@@ -2075,12 +2161,13 @@ export class Processor {
         const lbBg: LetterboxBackground = letterboxBg ?? { type: 'blur' };
         const logo = logoOverlay && fs.existsSync(logoOverlay.filePath)
           ? logoOverlay : undefined;
-        const { filterComplex: rawFc, needsImageInput } = buildLetterboxFilter(assForFfmpeg, lbBg, logo, zoomEnabled ? cropFilter : undefined);
+        const effectiveCropFilter = (shouldTrack || cropFrames.length > 0) ? cropFilter : undefined;
+        const { filterComplex: rawFc, needsImageInput } = buildLetterboxFilter(assForFfmpeg, lbBg, logo, effectiveCropFilter);
         const imageInput = needsImageInput && lbBg.imagePath && fs.existsSync(lbBg.imagePath)
           ? ['-i', lbBg.imagePath] : [];
         const logoInput = logo ? ['-i', logo.filePath] : [];
         const baseFc = (needsImageInput && imageInput.length === 0)
-          ? buildLetterboxFilter(assForFfmpeg, { ...lbBg, type: 'blur' }, logo, zoomEnabled ? cropFilter : undefined).filterComplex
+          ? buildLetterboxFilter(assForFfmpeg, { ...lbBg, type: 'blur' }, logo, effectiveCropFilter).filterComplex
           : rawFc;
         const filterComplex = baseFc.replace('[vout]', '[voutRaw]') + ';[voutRaw]scale=540:960[vout]';
         ffmpegArgs = [
@@ -2341,7 +2428,7 @@ export class Processor {
       if (!fs.existsSync(outputJson)) return [];
 
       const data = JSON.parse(fs.readFileSync(outputJson, 'utf-8')) as {
-        frames: Array<{ frameIndex: number; timestampMs: number; cx: number; cy: number; hasFace: boolean; faceSpanW?: number }>;
+        frames: Array<{ frameIndex: number; timestampMs: number; cx: number; cy: number; hasFace: boolean; faceSpanW?: number; isCut?: boolean }>;
         avgCx: number;
         avgCy: number;
         width: number;
@@ -2365,6 +2452,7 @@ export class Processor {
         cy:          f.cy,
         hasFace:     f.hasFace,
         faceSpanW:   f.faceSpanW ?? 0,
+        isCut:       f.isCut ?? false,
       }));
     } catch {
       try { fs.unlinkSync(outputJson); } catch { /* ignore */ }
@@ -2489,7 +2577,7 @@ export class Processor {
       if (!fs.existsSync(outputJson)) return [];
 
       const data = JSON.parse(fs.readFileSync(outputJson, 'utf-8')) as {
-        frames: Array<{ frameIndex: number; timestampMs: number; cx: number; cy: number; hasFace: boolean; faceSpanW?: number }>;
+        frames: Array<{ frameIndex: number; timestampMs: number; cx: number; cy: number; hasFace: boolean; faceSpanW?: number; isCut?: boolean }>;
         speakerFaces?: Record<string, { avgCx: number }>;
       };
       try { fs.unlinkSync(outputJson); } catch { /* ignore */ }
@@ -2509,6 +2597,7 @@ export class Processor {
         cy:          f.cy,
         hasFace:     f.hasFace,
         faceSpanW:   f.faceSpanW ?? 0,
+        isCut:       f.isCut ?? false,
       }));
     } catch {
       try { fs.unlinkSync(outputJson); } catch { /* ignore */ }
@@ -2563,11 +2652,17 @@ export class Processor {
     optionsJson?: string;
     reactionTtsPath?: string;
     reactionWords?: TranscriptWord[];
+    reactionDurationMs?: number;
+    interruptionTimestampSec?: number;
     takeawayTtsPath?: string;
     takeawayWords?: TranscriptWord[];
     customThumbnailPath?: string;
     brandingLogoPath?: string;
+    brollConfig?: BrollConfig;
     originalTranscriptWords?: TranscriptWord[];
+    pexelsApiKey?: string;
+    pixabayApiKey?: string;
+    hookHeadline?: string;
   }): Promise<void> {
     if (opts.commentaryMode === 'hook_only' || opts.commentaryMode === 'hook_replay_outro') {
       return this._renderHookOnlyCommentaryVideo(opts);
@@ -2589,6 +2684,11 @@ export class Processor {
 
     log.info({ sourceVideoPath, ttsAudioPath, presetId, duckingVolume }, 'Rendering final commentary video with ASS subtitles and audio mixing');
 
+    let parsedOpts: any = {};
+    if (optionsJson) {
+      try { parsedOpts = JSON.parse(optionsJson); } catch {}
+    }
+
     let inputVideoPath = sourceVideoPath;
     let tmpCleanVideoPath: string | null = null;
 
@@ -2597,10 +2697,6 @@ export class Processor {
       try {
         log.info({ sourceFile, startMs, endMs }, 'Rendering clean video segment without original subtitles for commentary');
         tmpCleanVideoPath = path.join(os.tmpdir(), `clean_commentary_${Date.now()}.mp4`);
-        let parsedOpts: any = {};
-        if (optionsJson) {
-          try { parsedOpts = JSON.parse(optionsJson); } catch {}
-        }
 
         await this.process({
           clipId: opts.clipId || 'clean',
@@ -2631,16 +2727,15 @@ export class Processor {
       }
     }
 
-    // 1. Build ASS Subtitle Content for Commentary
-    const presetKey = (presetId as CaptionPresetId) in CAPTION_PRESETS ? (presetId as CaptionPresetId) : 'tiktok';
+    // Generate ASS subtitle file
     const resolvedCaption: CaptionStyle = opts.captionStyle ?? {
-      presetId: presetKey,
-      ...CAPTION_PRESETS[presetKey],
+      presetId,
+      ...CAPTION_PRESETS[presetId],
     };
 
-    const assContent = await buildAssSubtitles(words, 0, durationMs, resolvedCaption, inputVideoPath);
-
-    // Inject title overlay if configured in optionsJson
+    // Use ttsAudioPath (not inputVideoPath) for loudness detection — shake effect
+    // must analyse the TTS voice audio since `words` timestamps are TTS-relative.
+    const assContent = await buildAssSubtitles(words, 0, durationMs, resolvedCaption, ttsAudioPath);
     let titleOverlay = (opts as any).titleOverlay;
     if (!titleOverlay && optionsJson) {
       try {
@@ -2653,10 +2748,7 @@ export class Processor {
     if (titleOverlay) {
       const titleResult = buildTitleEvents(titleOverlay, durationMs);
       if (titleResult) {
-        finalAss = finalAss.replace(
-          /\r?\n\r?\n\[Events\]/,
-          `\n${titleResult.styleLine}\n\n[Events]`
-        );
+        finalAss = finalAss.replace(/\r?\n\r?\n\[Events\]/, `\n${titleResult.styleLine}\n\n[Events]`);
         finalAss += titleResult.dialogueLine + '\n';
       }
     }
@@ -2664,10 +2756,12 @@ export class Processor {
     const tmpAssPath = path.join(os.tmpdir(), `commentary-sub-${Date.now()}.ass`);
     fs.writeFileSync(tmpAssPath, finalAss, 'utf-8');
 
-    // Escape ASS file path for FFmpeg subtitles filter on Windows
-    const escapedAssPath = tmpAssPath.replace(/\\/g, '/').replace(/:/g, '\\:');
+    // Build FFmpeg command with subtitles filter and audio ducking
+    const isWin = process.platform === 'win32';
+    const escapedAssPath = isWin
+      ? tmpAssPath.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '$1\\:')
+      : tmpAssPath;
 
-    // Robust fonts directory resolution across dev environment & production Electron build (win-unpacked)
     const possibleFontDirs = [
       path.join(process.cwd(), 'resources', 'fonts'),
       path.join(__dirname, '..', '..', 'resources', 'fonts'),
@@ -2685,33 +2779,69 @@ export class Processor {
     }
 
     const escapedFontsDir = resolvedFontsDir
-      ? resolvedFontsDir.replace(/\\/g, '/').replace(/:/g, '\\:')
+      ? (isWin ? resolvedFontsDir.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '$1\\:') : resolvedFontsDir)
       : '';
 
     const subtitlesFilter = escapedFontsDir
       ? `subtitles='${escapedAssPath}':fontsdir='${escapedFontsDir}'`
       : `subtitles='${escapedAssPath}'`;
 
-    // 2. FFmpeg Command Arguments — Radio Broadcaster Dynamic Sidechain Ducking with Stream Splitting
-    // Calculate compression ratio for dynamic sidechain ducking (e.g. duckingVolume 0.20 -> ratio 5.0)
-    const ratio = Math.max(2, Math.min(20, Math.round((1 / Math.max(0.05, duckingVolume)) * 10) / 10));
+    const bgMusicPath = opts.bgMusicPath;
+    const hasBgm = bgMusicPath && fs.existsSync(bgMusicPath);
 
-    const filterComplex = `[0:v]${subtitlesFilter}[vout];[1:a]volume=1.2,apad,asplit=2[tts_sc][tts_mix];[0:a][tts_sc]sidechaincompress=threshold=0.015:ratio=${ratio}:attack=15:release=350:knee=2.8[bg_ducked];[bg_ducked][tts_mix]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0[aout]`;
-
-    const args = [
+    const args: string[] = [
       '-y',
       '-i', inputVideoPath,
       '-i', ttsAudioPath,
-      '-filter_complex', filterComplex,
+    ];
+
+    let bgmIdx = 2;
+    if (hasBgm) {
+      args.push('-i', bgMusicPath!);
+      bgmIdx = args.length / 2 - 1; // 2
+    }
+
+    let brandIdx = -1;
+    const brandingLogoPath = opts.brandingLogoPath;
+    const hasBranding = brandingLogoPath && fs.existsSync(brandingLogoPath);
+    if (hasBranding) {
+      args.push('-i', brandingLogoPath!);
+      brandIdx = hasBgm ? 3 : 2;
+    }
+
+    // Video filter chain: optional Branding Logo -> ASS subtitles
+    const filterParts: string[] = [];
+    let currentVLabel = '0:v';
+
+    if (hasBranding) {
+      filterParts.push(`[${brandIdx}:v]scale=120:-1[brand_scaled]`);
+      filterParts.push(`[0:v][brand_scaled]overlay=W-w-32:32[vout_brand]`);
+      currentVLabel = 'vout_brand';
+    }
+
+    filterParts.push(`[${currentVLabel}]${subtitlesFilter}[vout]`);
+
+    // Audio mixing with sidechain ducking + optional BGM (BGM volume stays constant, original video audio ducks)
+    const ratio = Math.max(2, Math.min(20, Math.round((1 / Math.max(0.05, duckingVolume)) * 10) / 10));
+    if (hasBgm) {
+      const bgmVol = opts.bgMusicVolume ?? 0.20;
+      filterParts.push(`[1:a]volume=1.3,apad,asplit=2[tts_sc][tts_mix];[0:a][tts_sc]sidechaincompress=threshold=0.015:ratio=${ratio}:attack=15:release=350:knee=2.8[bg_ducked];[${bgmIdx}:a]volume=${bgmVol}[bgm_layer];[bg_ducked][bgm_layer][tts_mix]amix=inputs=3:duration=first:dropout_transition=0:weights=1 1 1:normalize=0[aout]`);
+    } else {
+      filterParts.push(`[1:a]volume=1.3,apad,asplit=2[tts_sc][tts_mix];[0:a][tts_sc]sidechaincompress=threshold=0.015:ratio=${ratio}:attack=15:release=350:knee=2.8[bg_ducked];[bg_ducked][tts_mix]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0[aout]`);
+    }
+
+    args.push(
+      '-filter_complex', filterParts.join(';'),
       '-map', '[vout]',
       '-map', '[aout]',
       '-c:v', 'libx264',
       '-crf', '17',
       '-preset', 'slow',
+      '-pix_fmt', 'yuv420p',
       '-c:a', 'aac',
       '-b:a', '320k',
       outputPath,
-    ];
+    );
 
     try {
       await runProcess('ffmpeg', args);
@@ -2745,11 +2875,17 @@ export class Processor {
     optionsJson?: string;
     reactionTtsPath?: string;
     reactionWords?: TranscriptWord[];
+    reactionDurationMs?: number;
+    interruptionTimestampSec?: number;
     takeawayTtsPath?: string;
     takeawayWords?: TranscriptWord[];
     customThumbnailPath?: string;
     brandingLogoPath?: string;
+    brollConfig?: BrollConfig;
     originalTranscriptWords?: TranscriptWord[];
+    pexelsApiKey?: string;
+    pixabayApiKey?: string;
+    hookHeadline?: string;
   }): Promise<void> {
     const {
       sourceVideoPath,
@@ -2777,9 +2913,11 @@ export class Processor {
     } catch (durErr) {
       log.warn({ durErr }, 'Failed to measure ttsAudioPath duration, fallback to 3000ms');
     }
-    // Add 650ms padding (250ms natural tail + 400ms transition buffer) so dubber finishes BEFORE xfade starts
-    const hookDurationMs = Math.max(2000, Math.ceil(hookAudioDurationMs) + 650);
-    log.info({ hookAudioDurationMs, hookDurationMs }, 'Calculated dynamic hook intro segment duration');
+    // High-retention J-Cut: 1.2s raw cartoon dialogue before TTS voiceover + 1.15x speed rate
+    const voiceDelayMs = 1200;
+    const effectiveTtsDurMs = Math.ceil(hookAudioDurationMs / 1.15);
+    const hookDurationMs = Math.max(3000, effectiveTtsDurMs + voiceDelayMs + 450);
+    log.info({ hookAudioDurationMs, effectiveTtsDurMs, voiceDelayMs, hookDurationMs }, 'Calculated dynamic hook intro segment duration with J-Cut');
 
     const tmpDir = os.tmpdir();
     const segAPath = path.join(tmpDir, `hook_segA_${Date.now()}.mp4`);
@@ -2794,7 +2932,8 @@ export class Processor {
     const isUsingRawFile = rawVideoFile === sourceFile;
 
     // -------------------------------------------------------------------------
-    // 1. Render Segment A (0s – 3.0s Hook Intro)
+    // 1. Render Segment A (0s – 3.5s Hook Intro)
+    // Logo & Channel Title Overlay are hidden in 0-3.5s, replaced by Auto Top Hook Banner
     // -------------------------------------------------------------------------
     const tmpCleanIntroPath = path.join(tmpDir, `clean_intro_${Date.now()}.mp4`);
     if (isUsingRawFile) {
@@ -2814,7 +2953,7 @@ export class Processor {
         gameRatio: parsedOpts.gameRatio,
         gamePosition: parsedOpts.gamePosition,
         letterboxBg: parsedOpts.letterboxBg,
-        logoOverlay: parsedOpts.logoOverlay,
+        logoOverlay: undefined, // Hide channel logo in 0-3.5s hook intro
         words: [],
         captionStyle: { ...CAPTION_PRESETS['none'], presetId: 'none' },
       });
@@ -2822,31 +2961,52 @@ export class Processor {
 
     const introInputPath = fs.existsSync(tmpCleanIntroPath) ? tmpCleanIntroPath : sourceVideoPath;
 
-    // Build ASS Subtitles for 3s Hook Phrase
+    // Build ASS Subtitles for Hook Phrase shifted by voiceDelayMs and scaled by 1.15x
     const presetKey = (presetId as CaptionPresetId) in CAPTION_PRESETS ? (presetId as CaptionPresetId) : 'tiktok';
     const resolvedCaption: CaptionStyle = opts.captionStyle ?? {
       presetId: presetKey,
       ...CAPTION_PRESETS[presetKey],
     };
 
-    // Use ttsAudioPath (not introInputPath) for loudness detection — shake effect
-    // must analyse the TTS voice audio since `words` timestamps are TTS-relative.
-    const assContent = await buildAssSubtitles(words, 0, hookDurationMs, resolvedCaption, ttsAudioPath);
-    let titleOverlay = (opts as any).titleOverlay;
-    if (!titleOverlay && optionsJson) {
-      try {
-        const parsed = JSON.parse(optionsJson);
-        if (parsed?.titleOverlay) titleOverlay = parsed.titleOverlay;
-      } catch {}
+    const shiftedWordsA: TranscriptWord[] = (words || []).map(w => ({
+      ...w,
+      startMs: Math.round(w.startMs / 1.15 + voiceDelayMs),
+      endMs: Math.round(w.endMs / 1.15 + voiceDelayMs),
+    }));
+
+    const assContent = await buildAssSubtitles(shiftedWordsA, 0, hookDurationMs, resolvedCaption, ttsAudioPath);
+    // Auto Top Hook Banner (High-contrast curiosity headline in the top third 0-3.5s)
+    let finalAss = assContent;
+    let hookHeadlineText = (opts.hookHeadline || '').trim();
+    if (!hookHeadlineText && words && words.length > 0) {
+      hookHeadlineText = words.map(w => w.word).join(' ').trim();
     }
 
-    let finalAss = assContent;
-    if (titleOverlay) {
-      const titleResult = buildTitleEvents(titleOverlay, hookDurationMs);
-      if (titleResult) {
-        finalAss = finalAss.replace(/\r?\n\r?\n\[Events\]/, `\n${titleResult.styleLine}\n\n[Events]`);
-        finalAss += titleResult.dialogueLine + '\n';
+    if (hookHeadlineText) {
+      const bannerDurationSec = Math.min(3.5, hookDurationMs / 1000);
+      const durFormat = (sec: number) => {
+        const m = Math.floor(sec / 60);
+        const s = (sec % 60).toFixed(2);
+        return `0:${m.toString().padStart(2, '0')}:${s.padStart(5, '0')}`;
+      };
+      const endFormatted = durFormat(bannerDurationSec);
+
+      // Smart 2-line balancing for maximum readability without ugly '...' truncation
+      const wordsArr = hookHeadlineText.split(/\s+/).filter(Boolean);
+      let displayHook = '';
+      if (wordsArr.length > 5) {
+        const mid = Math.ceil(wordsArr.length / 2);
+        displayHook = wordsArr.slice(0, mid).join(' ') + '\\N' + wordsArr.slice(mid).join(' ');
+      } else {
+        displayHook = wordsArr.join(' ');
       }
+
+      // Premium High-Converting Banner: Bold Montserrat 52px, vibrant yellow text with solid dark badge box at Y: 140px
+      const bannerStyleLine = `Style: HookBanner,Montserrat,52,&H0000FFFF,&H000000FF,&H00000000,&H00111111,-1,0,0,0,100,100,1,0,3,14,0,8,48,48,140,1`;
+      const bannerDialogueLine = `Dialogue: 1,0:00:00.00,${endFormatted},HookBanner,,0,0,0,,{\\fad(120,200)}⚠️ ${displayHook.toUpperCase()}`;
+
+      finalAss = finalAss.replace(/\r?\n\r?\n\[Events\]/, `\n${bannerStyleLine}\n\n[Events]`);
+      finalAss += bannerDialogueLine + '\n';
     }
 
     const tmpAssPathA = path.join(tmpDir, `hook-sub-${Date.now()}.ass`);
@@ -2876,7 +3036,7 @@ export class Processor {
       ? `subtitles='${escapedAssPathA}':fontsdir='${escapedFontsDir}'`
       : `subtitles='${escapedAssPathA}'`;
 
-    // Audio setup for Segment A: TTS (volume 1.0) + optional BGM (Mute original video audio)
+    // Audio setup for Segment A: J-Cut raw cartoon audio for 1.2s then ducked, 1.15x TTS + optional BGM
     const hasBgm = bgMusicPath && fs.existsSync(bgMusicPath);
     let filterComplexA = '';
     const argsA: string[] = ['-y', '-i', introInputPath, '-i', ttsAudioPath];
@@ -2884,9 +3044,9 @@ export class Processor {
     if (hasBgm) {
       argsA.push('-i', bgMusicPath!);
       const fadeStartSec = Math.max(0, (hookDurationMs - 250) / 1000);
-      filterComplexA = `[0:v]${subtitlesFilterA}[vout];[1:a]volume=1.2,apad[tts];[2:a]volume=${bgMusicVolume},afade=t=out:st=${fadeStartSec}:d=0.25[bgm];[tts][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`;
+      filterComplexA = `[0:v]${subtitlesFilterA}[vout];[0:a]volume='if(lt(t,1.0),1.0,if(lt(t,1.3),1.0-(t-1.0)/0.3*(1.0-0.12),0.12))':eval=frame,aformat=sample_rates=48000:channel_layouts=stereo[orig_a];[1:a]atempo=1.15,adelay=1200|1200,volume=1.4,apad,aformat=sample_rates=48000:channel_layouts=stereo[tts];[2:a]volume=${bgMusicVolume},afade=t=in:st=1.0:d=0.4,afade=t=out:st=${fadeStartSec}:d=0.25,aformat=sample_rates=48000:channel_layouts=stereo[bgm];[orig_a][tts][bgm]amix=inputs=3:duration=first:dropout_transition=0:weights=1 1 1:normalize=0[aout]`;
     } else {
-      filterComplexA = `[0:v]${subtitlesFilterA}[vout];[1:a]volume=1.2,apad[aout]`;
+      filterComplexA = `[0:v]${subtitlesFilterA}[vout];[0:a]volume='if(lt(t,1.0),1.0,if(lt(t,1.3),1.0-(t-1.0)/0.3*(1.0-0.12),0.12))':eval=frame,aformat=sample_rates=48000:channel_layouts=stereo[orig_a];[1:a]atempo=1.15,adelay=1200|1200,volume=1.4,apad,aformat=sample_rates=48000:channel_layouts=stereo[tts];[orig_a][tts]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0[aout]`;
     }
 
     argsA.push(
@@ -2904,152 +3064,410 @@ export class Processor {
     await runProcess('ffmpeg', argsA);
 
     // -------------------------------------------------------------------------
-    // 2. Render Segment B (Replay Clip with Original Conversation Subtitles & Audio)
+    // 2. Render Segment B (Raw Replay with Mid-Scene Freeze & Vocal Interjection)
     // -------------------------------------------------------------------------
-    emitCommentaryProgress(90, 'Rendering Segment B video replay...');
-    const origWords: TranscriptWord[] = opts.originalTranscriptWords && opts.originalTranscriptWords.length > 0
+    emitCommentaryProgress(91, 'Rendering Segment B Replay & Mid-Scene Commentary...');
+    const origWords = (opts.originalTranscriptWords && opts.originalTranscriptWords.length > 0)
       ? opts.originalTranscriptWords
       : (parsedOpts.words || []);
     const rawSegBWords = origWords.length > 0 ? origWords : (opts.reactionWords || []);
-    const segBRawPath = path.join(tmpDir, `hook_segB_raw_${Date.now()}.mp4`);
 
     const inputSource = (sourceFile && fs.existsSync(sourceFile)) ? sourceFile : sourceVideoPath;
     const processStartMs = inputSource === sourceFile ? startMs : 0;
     // Add 500ms buffer so Segment B audio/video doesn't get cut by xfade transition
     const processEndMs = (inputSource === sourceFile ? endMs : (endMs - startMs)) + 500;
+    const segBDurMs = processEndMs - processStartMs;
 
-    // Normalize segBWords timestamps to match the timeline that `process()` expects.
-    // `process()` input-seeks its source by `startMs` and offsets subtitles by the same
-    // amount, so words must live in the SAME timeline as the startMs/endMs passed to it.
-    // Decide deterministically from the WORD SOURCE, never by guessing from a single
-    // timestamp: the old `firstStart < startMs` heuristic wrongly shifted absolute words
-    // by +startMs whenever a boundary word started just before the cut, pushing every
-    // subtitle out of range -> Segment B subtitles vanished.
-    //   - originalTranscriptWords / project words -> ABSOLUTE full-video time
-    //   - reactionWords fallback                  -> already CLIP-relative (TTS 0-based)
     let normalizedWords: TranscriptWord[] = [];
     if (rawSegBWords.length > 0) {
       const usingReactionFallback = origWords.length === 0;
       if (inputSource === sourceFile) {
-        // process() seeks to absolute `startMs` -> words must be ABSOLUTE
         normalizedWords = usingReactionFallback
-          ? rawSegBWords.map((w) => ({ ...w, startMs: w.startMs + startMs, endMs: w.endMs + startMs }))
+          ? rawSegBWords.map((w: TranscriptWord) => ({ ...w, startMs: w.startMs + startMs, endMs: w.endMs + startMs }))
           : rawSegBWords;
       } else {
-        // process() seeks from 0 on the pre-cut clip -> words must be CLIP-relative
         normalizedWords = usingReactionFallback
           ? rawSegBWords
-          : rawSegBWords.map((w) => ({ ...w, startMs: Math.max(0, w.startMs - startMs), endMs: Math.max(0, w.endMs - startMs) }));
+          : rawSegBWords.map((w: TranscriptWord) => ({ ...w, startMs: Math.max(0, w.startMs - startMs), endMs: Math.max(0, w.endMs - startMs) }));
       }
     }
 
-    log.info({ inputSource, processStartMs, processEndMs, wordCount: normalizedWords.length }, 'Rendering Segment B with normalized subtitles');
+    // Plan B-roll cutaways if enabled
+    const effectiveBroll: BrollConfig | undefined = opts.brollConfig || (parsedOpts.brollConfig as BrollConfig | undefined);
+    let brollPlan: import('./BrollManager').BrollPlan = { cuts: [], uniqueVideos: [] };
+    if (effectiveBroll && effectiveBroll.enabled) {
+      try {
+        if (effectiveBroll.category === 'contextual') {
+          emitCommentaryProgress(92, 'AI Contextual B-Roll: scanning keywords and fetching matching footage...');
+          brollPlan = await BrollManager.getInstance().planContextualBroll(
+            normalizedWords,
+            segBDurMs,
+            effectiveBroll,
+            {
+              pexelsApiKey: opts.pexelsApiKey,
+              pixabayApiKey: opts.pixabayApiKey,
+            }
+          );
+        } else {
+          brollPlan = await BrollManager.getInstance().planBrollAsync(
+            segBDurMs,
+            effectiveBroll,
+            {
+              pexelsApiKey: opts.pexelsApiKey,
+              pixabayApiKey: opts.pixabayApiKey,
+            }
+          );
+        }
+      } catch (brollErr) {
+        log.warn({ brollErr }, 'Failed to plan B-roll cutaways for Segment B');
+      }
+    }
+    const hasBroll = brollPlan.cuts.length > 0;
 
-    await this.process({
-      clipId: opts.clipId || 'hook_replay',
-      projectId: 'replay',
-      sourceFile: inputSource,
-      startMs: processStartMs,
-      endMs: processEndMs,
-      outputPath: segBRawPath,
-      subtitleStyle: parsedOpts.subtitleStyle || 'bold-white',
-      subtitlePosition: parsedOpts.subtitlePosition || 'lower-third',
-      zoomEnabled: parsedOpts.zoomEnabled ?? true,
-      trackingMode: parsedOpts.trackingMode ?? 'auto',
-      layoutPreset: parsedOpts.layoutPreset,
-      splitLayout: parsedOpts.splitLayout,
-      gameRatio: parsedOpts.gameRatio,
-      gamePosition: parsedOpts.gamePosition,
-      letterboxBg: parsedOpts.letterboxBg,
-      logoOverlay: parsedOpts.logoOverlay,
-      titleOverlay: parsedOpts.titleOverlay,
-      words: normalizedWords,
-      captionStyle: resolvedCaption,
-    });
-
-    // -------------------------------------------------------------------------
-    // 2b. Post-process Segment B: Radio Broadcaster Dynamic Audio Ducking & Watermark
-    // -------------------------------------------------------------------------
     const reactionTts = opts.reactionTtsPath;
     const hasReaction = reactionTts && fs.existsSync(reactionTts);
-    const brandingLogo = opts.brandingLogoPath;
-    const hasBranding = brandingLogo && fs.existsSync(brandingLogo);
+    const shouldSplitB = opts.commentaryMode === 'hook_replay_outro' && hasReaction && segBDurMs >= 14000;
 
-    if (hasReaction || hasBranding) {
-      emitCommentaryProgress(93, 'Post-processing Segment B audio ducking...');
-      log.info({ hasReaction, hasBranding }, 'Post-processing Segment B with Radio Broadcaster ducking and/or branding');
-
-      const argsB: string[] = ['-y', '-i', segBRawPath];
-      let inputIdx = 1;
-      const reactionIdx = hasReaction ? inputIdx++ : -1;
-      const brandingIdx = hasBranding ? inputIdx++ : -1;
-
-      if (hasReaction) argsB.push('-i', reactionTts!);
-      if (hasBranding) argsB.push('-i', brandingLogo!);
-
-      // Build filter_complex
-      const filterParts: string[] = [];
-      if (hasBranding) {
-        filterParts.push(`[${brandingIdx}:v]format=rgba,colorchannelmixer=aa=0.35,scale=120:-1[wm];[0:v][wm]overlay=W-w-20:H-h-20[vout]`);
+    const applyBrollCuts = async (inPath: string, cuts: import('./BrollManager').BrollCut[], uniqueVideos: string[], outPath: string): Promise<void> => {
+      if (cuts.length === 0 || uniqueVideos.length === 0) {
+        fs.copyFileSync(inPath, outPath);
+        return;
       }
-      if (hasReaction) {
-        // Dynamic sidechain ducking: when AI dubbing speaks, video audio ducks; when silent, video audio swells to 100%
-        // TTS must be asplit into 2 streams: one for sidechain key signal, one for final mix
-        filterParts.push(`[${reactionIdx}:a]volume=1.2,apad,asplit=2[tts_sc][tts_mix];[0:a][tts_sc]sidechaincompress=threshold=0.08:ratio=8:attack=15:release=250[ducked];[ducked][tts_mix]amix=inputs=2:duration=first:dropout_transition=0[aout]`);
-      }
-
-      const filterComplex = filterParts.join(';');
-      argsB.push('-filter_complex', filterComplex);
-
-      if (hasBranding) {
-        argsB.push('-map', '[vout]');
-      } else {
-        argsB.push('-map', '0:v');
-      }
-
-      if (hasReaction) {
-        argsB.push('-map', '[aout]');
-      } else {
-        argsB.push('-map', '0:a');
-      }
-
-      argsB.push(
-        '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
-        '-pix_fmt', 'yuv420p', '-s', '1080x1920',
-        '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
-        segBPath
-      );
-
-      try {
-        await runProcess('ffmpeg', argsB);
-        log.info('Segment B post-processed with reaction commentary and/or branding');
-      } catch (postErr) {
-        log.warn({ postErr }, 'Segment B post-processing failed, re-encoding raw Segment B');
-        try {
-          await runProcess('ffmpeg', [
-            '-y', '-i', segBRawPath,
-            '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
-            '-pix_fmt', 'yuv420p', '-s', '1080x1920',
-            '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
-            segBPath,
-          ]);
-        } catch {
-          fs.copyFileSync(segBRawPath, segBPath);
+      const argsBroll = ['-y', '-i', inPath];
+      const videoMap = new Map<string, number>();
+      let inIdx = 1;
+      for (const uv of uniqueVideos) {
+        if (fs.existsSync(uv)) {
+          argsBroll.push('-i', uv);
+          videoMap.set(uv, inIdx++);
         }
       }
-    } else {
-      // Re-encode to ensure consistent yuv420p 1080x1920 48kHz stereo for xfade joining
+      const isLetterbox = !!parsedOpts.letterboxBg || parsedOpts.layoutPreset === 'letterbox';
+      const cropRatio = parsedOpts.letterboxBg?.crop || '1:1';
+      const brollRes = BrollManager.getInstance().buildFfmpegFilter('0:v', cuts, videoMap, 1080, 1920, { isLetterbox, crop: cropRatio });
+      if (brollRes.filterString) {
+        argsBroll.push(
+          '-filter_complex', brollRes.filterString,
+          '-map', `[${brollRes.outputLabel}]`,
+          '-map', '0:a',
+          '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
+          '-pix_fmt', 'yuv420p', '-r', '30',
+          '-c:a', 'copy',
+          outPath
+        );
+        await runProcess('ffmpeg', argsBroll);
+      } else {
+        fs.copyFileSync(inPath, outPath);
+      }
+    };
+
+    const burnSubtitlesOnVideo = async (inVideoPath: string, wordsList: TranscriptWord[], clipStartMs: number, clipEndMs: number, outVideoPath: string): Promise<void> => {
+      const assData = await buildAssSubtitles(wordsList, clipStartMs, clipEndMs, resolvedCaption, inVideoPath);
+      let finalAssB = assData;
+      let channelTitleOverlay = (opts as any).titleOverlay;
+      if (!channelTitleOverlay && optionsJson) {
+        try {
+          const parsed = JSON.parse(optionsJson);
+          if (parsed?.titleOverlay) channelTitleOverlay = parsed.titleOverlay;
+        } catch {}
+      }
+      if (channelTitleOverlay) {
+        const titleResult = buildTitleEvents(channelTitleOverlay, clipEndMs - clipStartMs);
+        if (titleResult) {
+          finalAssB = finalAssB.replace(/\r?\n\r?\n\[Events\]/, `\n${titleResult.styleLine}\n\n[Events]`);
+          finalAssB += titleResult.dialogueLine + '\n';
+        }
+      }
+      const tmpAssPath = path.join(tmpDir, `commentary_sub_${Date.now()}_${Math.random().toString(36).substring(2, 6)}.ass`);
+      fs.writeFileSync(tmpAssPath, finalAssB, 'utf-8');
+      const isWin = process.platform === 'win32';
+      const escapedPath = isWin
+        ? tmpAssPath.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '$1\\:')
+        : tmpAssPath;
+      const subsFilter = escapedFontsDir
+        ? `subtitles='${escapedPath}':fontsdir='${escapedFontsDir}'`
+        : `subtitles='${escapedPath}'`;
+      await runProcess('ffmpeg', [
+        '-y',
+        '-i', inVideoPath,
+        '-filter_complex', `[0:v]${subsFilter},format=yuv420p[vout]`,
+        '-map', '[vout]',
+        '-map', '0:a',
+        '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
+        '-pix_fmt', 'yuv420p', '-r', '30',
+        '-c:a', 'copy',
+        outVideoPath,
+      ]);
+      try { fs.unlinkSync(tmpAssPath); } catch {}
+    };
+
+    if (shouldSplitB) {
+      // -----------------------------------------------------------------------
+      // 2A. ACTIVE MID-SCENE VOCAL INTERJECTION & FREEZE-FRAME SPLIT (B1 + Jeda + B2)
+      // -----------------------------------------------------------------------
+      emitCommentaryProgress(92, 'Creating Mid-Scene Freeze-Frame & Vocal Commentary Interruption...');
+      let interruptionMs = opts.interruptionTimestampSec
+        ? Math.round(opts.interruptionTimestampSec * 1000)
+        : Math.round(segBDurMs * 0.60);
+      interruptionMs = Math.max(5000, Math.min(segBDurMs - 4000, interruptionMs));
+
+      const splitPointMs = processStartMs + interruptionMs;
+
+      // 1. Render Segment B1 (0 to interruptionMs): Clean video without subtitle burn-in
+      const segB1CleanPath = path.join(tmpDir, `segB1_clean_${Date.now()}.mp4`);
+      const wordsB1 = normalizedWords.filter(w => w.startMs < splitPointMs);
+      await this.process({
+        clipId: opts.clipId || 'hook_replay_b1',
+        projectId: 'replay_b1',
+        sourceFile: inputSource,
+        startMs: processStartMs,
+        endMs: splitPointMs,
+        outputPath: segB1CleanPath,
+        subtitleStyle: 'none',
+        subtitlePosition: 'lower-third',
+        zoomEnabled: parsedOpts.zoomEnabled ?? true,
+        trackingMode: parsedOpts.trackingMode ?? 'auto',
+        layoutPreset: parsedOpts.layoutPreset,
+        splitLayout: parsedOpts.splitLayout,
+        gameRatio: parsedOpts.gameRatio,
+        gamePosition: parsedOpts.gamePosition,
+        letterboxBg: parsedOpts.letterboxBg,
+        logoOverlay: parsedOpts.logoOverlay,
+        words: [],
+        captionStyle: { ...CAPTION_PRESETS['none'], presetId: 'none' },
+      });
+
+      // Extract freeze frame image from CLEAN B1 (zero burned-in subtitles)
+      const freezeImgPath = path.join(tmpDir, `freeze_frame_${Date.now()}.jpg`);
+      let frameExtracted = false;
       try {
         await runProcess('ffmpeg', [
-          '-y', '-i', segBRawPath,
-          '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
-          '-pix_fmt', 'yuv420p', '-s', '1080x1920',
-          '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
-          segBPath,
+          '-y',
+          '-sseof', '-0.3',
+          '-i', segB1CleanPath,
+          '-vframes', '1',
+          '-q:v', '2',
+          freezeImgPath,
         ]);
-      } catch {
-        fs.copyFileSync(segBRawPath, segBPath);
+        if (fs.existsSync(freezeImgPath) && fs.statSync(freezeImgPath).size > 100) {
+          frameExtracted = true;
+        }
+      } catch {}
+
+      if (!frameExtracted) {
+        try {
+          await runProcess('ffmpeg', [
+            '-y',
+            '-i', segB1CleanPath,
+            '-vframes', '1',
+            '-q:v', '2',
+            freezeImgPath,
+          ]);
+          if (fs.existsSync(freezeImgPath) && fs.statSync(freezeImgPath).size > 100) {
+            frameExtracted = true;
+          }
+        } catch {}
       }
+
+      if (!frameExtracted) {
+        try {
+          await runProcess('ffmpeg', [
+            '-y',
+            '-ss', String(processStartMs / 1000),
+            '-i', inputSource,
+            '-vframes', '1',
+            '-q:v', '2',
+            freezeImgPath,
+          ]);
+        } catch {}
+      }
+
+      // Apply B-roll cuts on clean B1 (Punchline protection: leave 3.5s before interruption)
+      const segB1BrollPath = path.join(tmpDir, `segB1_broll_${Date.now()}.mp4`);
+      const cutsB1 = hasBroll ? brollPlan.cuts.filter(c => c.startMs >= 3500 && c.endMs <= interruptionMs - 3500) : [];
+      if (cutsB1.length > 0) {
+        await applyBrollCuts(segB1CleanPath, cutsB1, brollPlan.uniqueVideos, segB1BrollPath);
+        try { fs.unlinkSync(segB1CleanPath); } catch {}
+      } else {
+        fs.copyFileSync(segB1CleanPath, segB1BrollPath);
+        try { fs.unlinkSync(segB1CleanPath); } catch {}
+      }
+
+      // Burn conversation subtitles ON TOP of B-roll (Subtitles are never covered!)
+      const segB1Path = path.join(tmpDir, `segB1_${Date.now()}.mp4`);
+      await burnSubtitlesOnVideo(segB1BrollPath, wordsB1, processStartMs, splitPointMs, segB1Path);
+      try { fs.unlinkSync(segB1BrollPath); } catch {}
+
+      // 2. Render Segment Jeda (Freeze Frame + 1.15x AI Voiceover + BGM + Reaction Subtitles)
+      let reactionAudioDurMs = 2800;
+      try {
+        reactionAudioDurMs = (await this.getVideoDurationMs(reactionTts!)) / 1.15;
+      } catch {}
+      const freezeDurSec = Math.max(1.8, (Math.ceil(reactionAudioDurMs) + 300) / 1000);
+      const freezeDurMs = Math.round(freezeDurSec * 1000);
+
+      // Build Subtitles for Segment Jeda scaled by 1.15x
+      const rawReactionWords: TranscriptWord[] = (opts.reactionWords && opts.reactionWords.length > 0)
+        ? opts.reactionWords
+        : [{ word: 'Wait, look at this!', startMs: 100, endMs: freezeDurMs - 100, confidence: 1 }];
+      const scaledReactionWords = rawReactionWords.map(w => ({
+        ...w,
+        startMs: Math.round(w.startMs / 1.15),
+        endMs: Math.round(w.endMs / 1.15),
+      }));
+
+      const assContentJeda = await buildAssSubtitles(
+        scaledReactionWords,
+        0,
+        freezeDurMs,
+        resolvedCaption,
+        freezeImgPath
+      );
+      const tmpAssPathJeda = path.join(tmpDir, `commentary_subJeda_${Date.now()}.ass`);
+      fs.writeFileSync(tmpAssPathJeda, assContentJeda, 'utf-8');
+      const isWin = process.platform === 'win32';
+      const escapedAssJeda = isWin
+        ? tmpAssPathJeda.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '$1\\:')
+        : tmpAssPathJeda;
+      const subsFilterJeda = escapedFontsDir
+        ? `subtitles='${escapedAssJeda}':fontsdir='${escapedFontsDir}'`
+        : `subtitles='${escapedAssJeda}'`;
+
+      const segBJedaPath = path.join(tmpDir, `segB_jeda_${Date.now()}.mp4`);
+      const argsJeda: string[] = [
+        '-y',
+        '-loop', '1',
+        '-framerate', '30',
+        '-t', String(freezeDurSec),
+        '-i', freezeImgPath,
+        '-i', reactionTts!,
+      ];
+      let jedaFilter = '';
+
+      if (hasBgm) {
+        argsJeda.push('-i', bgMusicPath!);
+        const bgmVol = opts.bgMusicVolume ?? 0.20;
+        const fadeOutSec = Math.max(0, freezeDurSec - 0.25);
+        jedaFilter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1242:2208,crop=1080:1920,setsar=1,fps=30,${subsFilterJeda},format=yuv420p[vout];[1:a]atempo=1.15,volume=1.4,apad,aformat=sample_rates=48000:channel_layouts=stereo[tts];[2:a]volume=${bgmVol},afade=t=in:st=0:d=0.2,afade=t=out:st=${fadeOutSec}:d=0.25,aformat=sample_rates=48000:channel_layouts=stereo[bgm];[tts][bgm]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0[aout]`;
+      } else {
+        jedaFilter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1242:2208,crop=1080:1920,setsar=1,fps=30,${subsFilterJeda},format=yuv420p[vout];[1:a]atempo=1.15,volume=1.4,apad,aformat=sample_rates=48000:channel_layouts=stereo[aout]`;
+      }
+
+      argsJeda.push(
+        '-filter_complex', jedaFilter,
+        '-map', '[vout]',
+        '-map', '[aout]',
+        '-t', String(freezeDurSec),
+        '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
+        '-pix_fmt', 'yuv420p', '-r', '30',
+        '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
+        segBJedaPath
+      );
+      await runProcess('ffmpeg', argsJeda);
+      try { fs.unlinkSync(tmpAssPathJeda); } catch {}
+      try { fs.unlinkSync(freezeImgPath); } catch {}
+
+      // 3. Render Segment B2 (interruptionMs to end): Clean video without subtitle burn-in
+      const segB2CleanPath = path.join(tmpDir, `segB2_clean_${Date.now()}.mp4`);
+      const wordsB2 = normalizedWords.filter(w => w.startMs >= splitPointMs);
+      await this.process({
+        clipId: opts.clipId || 'hook_replay_b2',
+        projectId: 'replay_b2',
+        sourceFile: inputSource,
+        startMs: splitPointMs,
+        endMs: processEndMs,
+        outputPath: segB2CleanPath,
+        subtitleStyle: 'none',
+        subtitlePosition: 'lower-third',
+        zoomEnabled: parsedOpts.zoomEnabled ?? true,
+        trackingMode: parsedOpts.trackingMode ?? 'auto',
+        layoutPreset: parsedOpts.layoutPreset,
+        splitLayout: parsedOpts.splitLayout,
+        gameRatio: parsedOpts.gameRatio,
+        gamePosition: parsedOpts.gamePosition,
+        letterboxBg: parsedOpts.letterboxBg,
+        logoOverlay: parsedOpts.logoOverlay,
+        words: [],
+        captionStyle: { ...CAPTION_PRESETS['none'], presetId: 'none' },
+      });
+
+      // Apply B-roll cuts on clean B2 (Punchline protection: exclude cuts in first 2.5s and last 3.5s)
+      const segB2BrollPath = path.join(tmpDir, `segB2_broll_${Date.now()}.mp4`);
+      const cutsB2 = hasBroll ? brollPlan.cuts.filter(c => c.startMs >= interruptionMs + 2500 && c.endMs <= segBDurMs - 3500).map(c => ({
+        ...c,
+        startMs: Math.max(0, c.startMs - interruptionMs),
+        endMs: Math.max(0, c.endMs - interruptionMs),
+      })) : [];
+      if (cutsB2.length > 0) {
+        await applyBrollCuts(segB2CleanPath, cutsB2, brollPlan.uniqueVideos, segB2BrollPath);
+        try { fs.unlinkSync(segB2CleanPath); } catch {}
+      } else {
+        fs.copyFileSync(segB2CleanPath, segB2BrollPath);
+        try { fs.unlinkSync(segB2CleanPath); } catch {}
+      }
+
+      // Burn conversation subtitles ON TOP of B-roll
+      const segB2Path = path.join(tmpDir, `segB2_${Date.now()}.mp4`);
+      await burnSubtitlesOnVideo(segB2BrollPath, wordsB2, splitPointMs, processEndMs, segB2Path);
+      try { fs.unlinkSync(segB2BrollPath); } catch {}
+
+      // 4. Concatenate B1 + Jeda + B2 into segBPath with explicit format and framerate alignment
+      emitCommentaryProgress(94, 'Joining Replay Part 1, Vocal Interruption & Part 2...');
+      await runProcess('ffmpeg', [
+        '-y',
+        '-i', segB1Path,
+        '-i', segBJedaPath,
+        '-i', segB2Path,
+        '-filter_complex', '[0:v]fps=30,setsar=1,format=yuv420p[v0];[0:a]aformat=sample_rates=48000:channel_layouts=stereo[a0];[1:v]fps=30,setsar=1,format=yuv420p[v1];[1:a]aformat=sample_rates=48000:channel_layouts=stereo[a1];[2:v]fps=30,setsar=1,format=yuv420p[v2];[2:a]aformat=sample_rates=48000:channel_layouts=stereo[a2];[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vcat][acat]',
+        '-map', '[vcat]',
+        '-map', '[acat]',
+        '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
+        '-pix_fmt', 'yuv420p', '-r', '30',
+        '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
+        segBPath,
+      ]);
+
+      try { fs.unlinkSync(segB1Path); } catch {}
+      try { fs.unlinkSync(segBJedaPath); } catch {}
+      try { fs.unlinkSync(segB2Path); } catch {}
+      log.info('Segment B (B1 + Jeda + B2) successfully rendered and joined');
+    } else {
+      // Single continuous Segment B
+      const segBCleanPath = path.join(tmpDir, `hook_segB_clean_${Date.now()}.mp4`);
+      await this.process({
+        clipId: opts.clipId || 'hook_replay',
+        projectId: 'replay',
+        sourceFile: inputSource,
+        startMs: processStartMs,
+        endMs: processEndMs,
+        outputPath: segBCleanPath,
+        subtitleStyle: 'none',
+        subtitlePosition: 'lower-third',
+        zoomEnabled: parsedOpts.zoomEnabled ?? true,
+        trackingMode: parsedOpts.trackingMode ?? 'auto',
+        layoutPreset: parsedOpts.layoutPreset,
+        splitLayout: parsedOpts.splitLayout,
+        gameRatio: parsedOpts.gameRatio,
+        gamePosition: parsedOpts.gamePosition,
+        letterboxBg: parsedOpts.letterboxBg,
+        logoOverlay: parsedOpts.logoOverlay,
+        titleOverlay: parsedOpts.titleOverlay,
+        words: [],
+        captionStyle: { ...CAPTION_PRESETS['none'], presetId: 'none' },
+      });
+
+      const segBBrollPath = path.join(tmpDir, `hook_segB_broll_${Date.now()}.mp4`);
+      if (hasBroll) {
+        await applyBrollCuts(segBCleanPath, brollPlan.cuts, brollPlan.uniqueVideos, segBBrollPath);
+        try { fs.unlinkSync(segBCleanPath); } catch {}
+      } else {
+        fs.copyFileSync(segBCleanPath, segBBrollPath);
+        try { fs.unlinkSync(segBCleanPath); } catch {}
+      }
+
+      // Burn subtitles ON TOP of B-roll
+      await burnSubtitlesOnVideo(segBBrollPath, normalizedWords, processStartMs, processEndMs, segBPath);
+      try { fs.unlinkSync(segBBrollPath); } catch {}
     }
 
     // -------------------------------------------------------------------------
@@ -3088,13 +3506,14 @@ export class Processor {
     let hasSegC = false;
 
     if (is3SegMode) {
-      emitCommentaryProgress(95, 'Rendering Segment C moral takeaway outro...');
-      log.info('Rendering Segment C Educational Moral Takeaway Outro (Replaying Raw Source Video Clip)');
+      emitCommentaryProgress(95, 'Rendering Segment C trivia takeaway outro...');
+      log.info('Rendering Segment C Trivia Takeaway Outro (Replaying Raw Source Video Clip)');
       let takeawayAudioDurationMs = 3500;
       try {
-        takeawayAudioDurationMs = await this.getVideoDurationMs(takeawayTts!);
+        takeawayAudioDurationMs = (await this.getVideoDurationMs(takeawayTts!)) / 1.15;
       } catch {}
-      const takeawayDurMs = Math.max(3000, Math.ceil(takeawayAudioDurationMs) + 300);
+      // Clamp Outro to max 4.5s for tight retention
+      const takeawayDurMs = Math.min(4500, Math.max(2500, Math.ceil(takeawayAudioDurationMs) + 300));
 
       const tmpCleanOutroPath = path.join(tmpDir, `clean_outro_${Date.now()}.mp4`);
 
@@ -3122,13 +3541,14 @@ export class Processor {
       });
 
       const outroInputPath = fs.existsSync(tmpCleanOutroPath) ? tmpCleanOutroPath : sourceVideoPath;
-      const outroWords: TranscriptWord[] = opts.takeawayWords || opts.reactionWords || [];
-      // DO NOT normalize timestamps — STT-aligned words are already correct relative to the TTS audio
-      // timeline (input [1:a] in the FFmpeg filter). Shifting them to 0ms causes subtitles to appear
-      // before the dubber actually speaks (because TTS audio has natural silence at the beginning).
-      log.info({ outroWordCount: outroWords.length, firstWord: outroWords[0] }, 'Using STT-aligned Segment C subtitle words as-is (no normalization)');
+      const rawOutroWords: TranscriptWord[] = opts.takeawayWords || opts.reactionWords || [];
+      const scaledOutroWords: TranscriptWord[] = rawOutroWords.map(w => ({
+        ...w,
+        startMs: Math.round(w.startMs / 1.15),
+        endMs: Math.round(w.endMs / 1.15),
+      }));
 
-      const assContentC = await buildAssSubtitles(outroWords, 0, 999999, resolvedCaption, outroInputPath);
+      const assContentC = await buildAssSubtitles(scaledOutroWords, 0, 999999, resolvedCaption, outroInputPath);
       tmpAssPathC = path.join(tmpDir, `commentary_subC_${Date.now()}.ass`);
       fs.writeFileSync(tmpAssPathC, assContentC, 'utf-8');
 
@@ -3140,12 +3560,12 @@ export class Processor {
         ? `subtitles='${escapedAssC}':fontsdir='${escapedFontsDir}'`
         : `subtitles='${escapedAssC}'`;
 
-      let filterComplexC = `[0:v]${subtitlesFilterC}[vout];[1:a]volume=1.2,apad[aout]`;
+      let filterComplexC = `[0:v]${subtitlesFilterC}[vout];[1:a]atempo=1.15,volume=1.35,apad,aformat=sample_rates=48000:channel_layouts=stereo[aout]`;
       const argsC: string[] = ['-y', '-i', outroInputPath, '-i', takeawayTts!];
 
       if (hasBgm) {
         argsC.push('-i', bgMusicPath!);
-        filterComplexC = `[0:v]${subtitlesFilterC}[vout];[1:a]volume=1.2,apad[tts];[2:a]volume=${bgMusicVolume},afade=t=in:st=0:d=0.25[bgm];[tts][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`;
+        filterComplexC = `[0:v]${subtitlesFilterC}[vout];[1:a]atempo=1.15,volume=1.35,apad,aformat=sample_rates=48000:channel_layouts=stereo[tts];[2:a]volume=${bgMusicVolume},afade=t=in:st=0:d=0.25,aformat=sample_rates=48000:channel_layouts=stereo[bgm];[tts][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`;
       }
 
       argsC.push(
@@ -3220,8 +3640,11 @@ export class Processor {
 
         const filterParts: string[] = [];
         if (transitionEffect !== 'none') {
-          filterParts.push(`[0:v][1:v]xfade=transition=${transitionEffect}:duration=${tDur}:offset=${offset1}[v01]`);
-          filterParts.push(`[v01][2:v]xfade=transition=${transitionEffect}:duration=${tDur}:offset=${offset2}[vout]`);
+          filterParts.push(`[0:v]format=yuv420p[v0]`);
+          filterParts.push(`[1:v]format=yuv420p[v1]`);
+          filterParts.push(`[2:v]format=yuv420p[v2]`);
+          filterParts.push(`[v0][v1]xfade=transition=${transitionEffect}:duration=${tDur}:offset=${offset1}[v01]`);
+          filterParts.push(`[v01][v2]xfade=transition=${transitionEffect}:duration=${tDur}:offset=${offset2},format=yuv420p[vout]`);
 
           filterParts.push(`[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0]`);
           filterParts.push(`[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1]`);
@@ -3246,6 +3669,7 @@ export class Processor {
           '-map', '[vout]',
           '-map', '[aout]',
           '-c:v', 'libx264', '-crf', '17', '-preset', 'medium',
+          '-pix_fmt', 'yuv420p',
           '-c:a', 'aac', '-b:a', '320k',
           outputPath
         );
@@ -3267,7 +3691,9 @@ export class Processor {
 
         const filterParts: string[] = [];
         if (transitionEffect !== 'none') {
-          filterParts.push(`[0:v][1:v]xfade=transition=${transitionEffect}:duration=${tDur2}:offset=${offset1}[vout]`);
+          filterParts.push(`[0:v]format=yuv420p[v0]`);
+          filterParts.push(`[1:v]format=yuv420p[v1]`);
+          filterParts.push(`[v0][v1]xfade=transition=${transitionEffect}:duration=${tDur2}:offset=${offset1},format=yuv420p[vout]`);
 
           filterParts.push(`[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0]`);
           filterParts.push(`[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1]`);
@@ -3288,6 +3714,7 @@ export class Processor {
           '-map', '[vout]',
           '-map', '[aout]',
           '-c:v', 'libx264', '-crf', '17', '-preset', 'medium',
+          '-pix_fmt', 'yuv420p',
           '-c:a', 'aac', '-b:a', '320k',
           outputPath
         );
@@ -3299,7 +3726,6 @@ export class Processor {
       try { fs.unlinkSync(tmpAssPathA); } catch {}
       try { fs.unlinkSync(segAPath); } catch {}
       try { fs.unlinkSync(segBPath); } catch {}
-      try { fs.unlinkSync(segBRawPath); } catch {}
       try { if (hasSegC) fs.unlinkSync(segCPath); } catch {}
       try { if (hasSegC && tmpAssPathC) fs.unlinkSync(tmpAssPathC); } catch {}
       try { if (useSeg0) fs.unlinkSync(seg0Path); } catch {}

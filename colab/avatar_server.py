@@ -450,8 +450,24 @@ def _get_rembg_session():
     try:
         from rembg import new_session
         model = os.environ.get('REMBG_MODEL', 'u2net_human_seg')
-        _REMBG_SESSION[0] = new_session(model)
-        _log('rembg session siap (model=' + model + ')')
+        # 1) Coba GPU provider terlebih dahulu jika onnxruntime-gpu & CUDA kompatibel
+        try:
+            _REMBG_SESSION[0] = new_session(model, providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+            _log('rembg session siap (CUDA/CPU, model=' + model + ')')
+            return _REMBG_SESSION[0]
+        except Exception as egpu:
+            _log('rembg CUDA provider gagal (' + str(egpu) + '), beralih ke CPU...')
+
+        # 2) Fallback ke CPU provider
+        try:
+            _REMBG_SESSION[0] = new_session(model, providers=['CPUExecutionProvider'])
+            _log('rembg session siap (CPU, model=' + model + ')')
+            return _REMBG_SESSION[0]
+        except Exception as ecpu:
+            _log('rembg CPU fallback gagal (' + str(ecpu) + '), coba default new_session...')
+            _REMBG_SESSION[0] = new_session(model)
+            _log('rembg session siap (default, model=' + model + ')')
+            return _REMBG_SESSION[0]
     except Exception as e:
         _log('rembg tak tersedia (', e, ') -> lewati hapus background')
         _REMBG_SESSION[0] = False

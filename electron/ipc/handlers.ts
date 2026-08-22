@@ -565,6 +565,8 @@ export function registerIpcHandlers(services: IpcServices): void {
         xttsColabUrl: settings?.xttsColabUrl,
         speakerAudioPath: settings?.speakerAudioPath,
         whisperModelSize: settings?.whisperModelSize || 'large',
+        pexelsApiKey: settings?.pexelsApiKey,
+        pixabayApiKey: settings?.pixabayApiKey,
       });
 
       // Create a NEW distinct Clip record for the Commentary Video in the DB

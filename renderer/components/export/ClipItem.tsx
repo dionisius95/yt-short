@@ -77,7 +77,9 @@ interface UploadDialogProps {
     categoryId?: string,
     defaultAudioLanguage?: string,
     defaultLanguage?: string,
-    customThumbnailPath?: string
+    customThumbnailPath?: string,
+    hasAlteredOrSyntheticContent?: boolean,
+    autoFairUseDisclaimer?: boolean
   ) => void;
   onCancel: () => void;
   uploading: boolean;
@@ -117,6 +119,8 @@ function UploadDialog({ hook, clip, onConfirm, onCancel, uploading, error }: Upl
   const [customThumbnailPath, setCustomThumbnailPath] = useState<string>('');
   const [aiGenerating, setAiGenerating] = useState(false);
   const [rightsConfirmed, setRightsConfirmed] = useState(false);
+  const [hasAlteredContent, setHasAlteredContent] = useState(true);
+  const [autoFairUse, setAutoFairUse] = useState(true);
 
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [youtubeAuth, setYoutubeAuth] = useState<{ authenticated: boolean; email?: string } | null>(null);
@@ -280,12 +284,15 @@ function UploadDialog({ hook, clip, onConfirm, onCancel, uploading, error }: Upl
       role="dialog"
       aria-modal="true"
       aria-label="Upload Video"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
     >
-      <div className="w-full max-w-md rounded-xl border border-border bg-surface p-6 shadow-2xl flex flex-col gap-5">
+      <div className="w-full max-w-lg max-h-[90vh] rounded-xl border border-border bg-surface shadow-2xl flex flex-col overflow-hidden animate-fade-in">
         {/* Header */}
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-text-primary">Upload Klip Video</h2>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-surface shrink-0">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-accent" />
+            <h2 className="text-sm font-semibold text-text-primary">Upload Klip Video</h2>
+          </div>
           <button
             type="button"
             aria-label="Close"
@@ -300,8 +307,8 @@ function UploadDialog({ hook, clip, onConfirm, onCancel, uploading, error }: Upl
           </button>
         </div>
 
-        {/* Fields */}
-        <div className="flex flex-col gap-4 max-h-[70vh] overflow-y-auto pr-1">
+        {/* Scrollable Fields */}
+        <div className="flex-1 overflow-y-auto px-6 py-4 flex flex-col gap-4">
           {/* Platform selection checkboxes */}
           <div className="flex flex-col gap-2 rounded-lg border border-border bg-background/50 p-3">
             <span className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide">
@@ -766,37 +773,69 @@ function UploadDialog({ hook, clip, onConfirm, onCancel, uploading, error }: Upl
               </div>
             </div>
           )}
+
+          {/* Error */}
+          {error && (
+            <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {error}
+            </p>
+          )}
+
+          {/* YPP & Fair Use compliance */}
+          <div className="flex flex-col gap-2 rounded-md border border-border bg-background/50 p-2.5">
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-text-primary">
+              <span className="h-2 w-2 rounded-full bg-accent animate-pulse" />
+              YPP Monetization & Policy Compliance
+            </div>
+            <label htmlFor="upload-ypp-altered" className="flex items-start gap-2.5 cursor-pointer">
+              <input
+                id="upload-ypp-altered"
+                type="checkbox"
+                checked={hasAlteredContent}
+                onChange={(e) => setHasAlteredContent(e.target.checked)}
+                className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-accent"
+              />
+              <span className="text-[11px] text-text-secondary leading-snug">
+                Deklarasikan Altered/Synthetic Media ke YouTube (Wajib Kebijakan AI YPP).
+              </span>
+            </label>
+            <label htmlFor="upload-ypp-fairuse" className="flex items-start gap-2.5 cursor-pointer">
+              <input
+                id="upload-ypp-fairuse"
+                type="checkbox"
+                checked={autoFairUse}
+                onChange={(e) => setAutoFairUse(e.target.checked)}
+                className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-accent"
+              />
+              <span className="text-[11px] text-text-secondary leading-snug">
+                Sertakan Atribusi & Klausul Fair Use Transformative Commentary di deskripsi.
+              </span>
+            </label>
+          </div>
+
+          {/* Copyright confirmation */}
+          <label
+            htmlFor="upload-rights-confirm"
+            className={cn(
+              'flex items-start gap-3 rounded-md border px-3 py-2.5 cursor-pointer transition-micro',
+              rightsConfirmed ? 'border-success/60 bg-success/5' : 'border-border bg-background'
+            )}
+          >
+            <input
+              id="upload-rights-confirm"
+              type="checkbox"
+              checked={rightsConfirmed}
+              onChange={(e) => setRightsConfirmed(e.target.checked)}
+              className="mt-0.5 h-4 w-4 shrink-0 accent-accent"
+            />
+            <span className="text-[11px] text-text-secondary leading-relaxed">
+              Saya memiliki hak atau izin atas materi ini, dan bertanggung jawab penuh atas kepatuhan hak cipta saat mengunggah.
+            </span>
+          </label>
         </div>
 
-        {/* Error */}
-        {error && (
-          <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-            {error}
-          </p>
-        )}
-
-        {/* Copyright confirmation */}
-        <label
-          htmlFor="upload-rights-confirm"
-          className={cn(
-            'flex items-start gap-3 rounded-md border px-3 py-2.5 cursor-pointer transition-micro',
-            rightsConfirmed ? 'border-success/60 bg-success/5' : 'border-border bg-background'
-          )}
-        >
-          <input
-            id="upload-rights-confirm"
-            type="checkbox"
-            checked={rightsConfirmed}
-            onChange={(e) => setRightsConfirmed(e.target.checked)}
-            className="mt-0.5 h-4 w-4 shrink-0 accent-accent"
-          />
-          <span className="text-[11px] text-text-secondary leading-relaxed">
-            Saya memiliki hak atau izin atas materi ini, dan bertanggung jawab penuh atas kepatuhan hak cipta saat mengunggah.
-          </span>
-        </label>
-
-        {/* Actions */}
-        <div className="flex justify-end gap-2">
+        {/* Fixed Sticky Footer Actions */}
+        <div className="flex items-center justify-end gap-2 px-6 py-3.5 border-t border-border bg-surface shrink-0">
           <button
             type="button"
             onClick={onCancel}
@@ -823,7 +862,21 @@ function UploadDialog({ hook, clip, onConfirm, onCancel, uploading, error }: Upl
                 });
               } catch {}
               const publishAt = privacy === 'private_scheduled' ? getPublishAtIso() : undefined;
-              onConfirm(selectedPlatforms, title, description, tagsArray, privacy, publishAt, selectedAccountIds, categoryId, defaultAudioLanguage, defaultLanguage, customThumbnailPath);
+              onConfirm(
+                selectedPlatforms,
+                title,
+                description,
+                tagsArray,
+                privacy,
+                publishAt,
+                selectedAccountIds,
+                categoryId,
+                defaultAudioLanguage,
+                defaultLanguage,
+                customThumbnailPath,
+                hasAlteredContent,
+                autoFairUse
+              );
             }}
             disabled={
               uploading ||
@@ -1205,7 +1258,9 @@ export function ClipItem({ clip, hook, onRemoved }: ClipItemProps) {
     categoryId?: string,
     defaultAudioLanguage?: string,
     defaultLanguage?: string,
-    customThumbnailPath?: string
+    customThumbnailPath?: string,
+    hasAlteredOrSyntheticContent?: boolean,
+    autoFairUseDisclaimer?: boolean
   ) => {
     setUploading(true);
     setUploadError(null);
@@ -1223,6 +1278,8 @@ export function ClipItem({ clip, hook, onRemoved }: ClipItemProps) {
         defaultAudioLanguage,
         defaultLanguage,
         customThumbnailPath,
+        hasAlteredOrSyntheticContent,
+        autoFairUseDisclaimer,
       });
       setUploadDialogOpen(false);
     } catch (err) {

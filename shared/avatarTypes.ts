@@ -50,6 +50,7 @@ export interface AvatarOverlay {
 export interface AvatarClips {
 	segmentA?: string;
 	segmentB?: string;
+	segmentJeda?: string;
 	segmentC?: string;
 }
 

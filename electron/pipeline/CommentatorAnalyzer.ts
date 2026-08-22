@@ -25,6 +25,8 @@ export interface CommentatorScriptSegment {
 export interface GeneratedCommentaryScript {
   hookText: string;
   scriptText: string;
+  middleInterjectionText?: string;
+  interruptionTimestampSec?: number;
   takeawayText?: string;
   targetWpm: number;
   estimatedDurationMs: number;
@@ -66,117 +68,84 @@ export class CommentatorAnalyzer {
   private _buildPrompt(durationSec: number, maxWords: number, targetAudience: 'US' | 'UK' | 'ID'): string {
     // Randomize tone per generation to prevent repetitive/formulaic outputs (anti-reused-content)
     const usUkTones = [
-      'deadpan disbelief — react like you genuinely cannot believe what you just saw',
-      'hype commentator — explosive energy like a sports commentator witnessing something legendary',
-      'storyteller — narrate like you are telling your best friend an insane story you just witnessed',
-      'dry wit — understated British-style humor, say less but make every word land',
-      'investigator — break down what happened like a detective uncovering clues in real-time',
-      'empathetic observer — connect emotionally with what the people in the video are feeling',
-      'shocked insider — react like someone who knows the context and is stunned by the outcome',
-      'philosophical narrator — observe the deeper meaning behind what is unfolding',
+      'film breakdown & scene deconstructor — analyze comedic timing, writing techniques, and director choices with sharp wit',
+      'sharp trivia expert — uncover insider trivia, voice acting easter eggs, and pop-culture context',
+      'deadpan comedy critic — react with hilarious deadpan analysis of the character absurdities',
+      'investigative commentator — break down the comedic setup and punchline anatomy like a pro',
     ];
     const idTones = [
-      'storyteller santai — ceritakan seperti ngobrol sama temen yang excited',
-      'kaget abis — react seolah benar-benar tidak percaya apa yang barusan terjadi',
-      'komentator seru — energi tinggi seperti komentator bola yang lihat gol spektakuler',
-      'bijak santai — sampaikan pelajaran hidup tapi dengan cara yang relatable dan tidak menggurui',
+      'bedah adegan & komedi — kupas teknik timing komedi dan kejeniusan penulis naskahnya secara seru',
+      'trivia & fakta unik — ungkap trivia tersembunyi dan konteks adegan yang bikin videonya 10x lebih menarik',
+      'analis santai — kupas kenapa adegan ini viral dan bikin ngakak dengan gaya bahasa gaul dan berbobot',
     ];
 
     const tones = targetAudience === 'ID' ? idTones : usUkTones;
     const selectedTone = tones[Math.floor(Math.random() * tones.length)];
 
     const audienceDesc = targetAudience === 'UK'
-      ? 'British English (UK) Shorts/Reels audience — witty, sharp, dry humor, relatable British expressions'
+      ? 'British English (UK) Shorts/Reels audience — witty, sharp, dry humor, film/comedy breakdown'
       : targetAudience === 'ID'
-        ? 'Indonesian Gen-Z/Millennial viral Shorts audience — bahasa gaul, relatable, engaging'
-        : 'American English (US) YouTube Shorts / TikTok audience — high energy, authentic, punchy';
+        ? 'Indonesian Gen-Z/Millennial viral Shorts audience — bahasa gaul, cerdas, bedah komedi/adegan'
+        : 'American English (US) YouTube Shorts / TikTok audience — high energy, authoritative scene breakdown & trivia';
 
-    return `You are a top-tier viral YouTube Shorts / Reels creator producing TRANSFORMATIVE, HIGH-VALUE commentary for ${audienceDesc}.
+    return `You are a top-tier viral YouTube Shorts / Reels creator producing INSIDER TRIVIA, BEHIND-THE-SCENES CONTROVERSY, and HIGH-RETENTION TRANSFORMATIVE COMMENTARY (fully compliant with YouTube Fair Use / YPP monetization policies) for ${audienceDesc}.
 
 YOUR VOICE/TONE FOR THIS VIDEO: ${selectedTone}.
 
-Analyze the video carefully, then write a commentary script that feels like a REAL knowledgeable human creator reacting or explaining — NOT a lazy AI reading what's on screen.
-
 ═══════════════════════════════════════
-CRITICAL RULE — TRANSFORMATIVE ADDED VALUE (NEVER NARRATE THE OBVIOUS):
+CRITICAL RETENTION & YPP RULES (STRICT):
 ═══════════════════════════════════════
-❌ NEVER just describe what the viewer can ALREADY SEE with their own eyes (e.g. DO NOT say "He walks into the room", "The man is laughing", "Look at the dog running"). Viewers HATE generic narration of obvious actions and will comment "AI adds literally nothing to the video".
-❌ DO NOT state obvious physical movements or recite dialogue.
+❌ NEVER praise the joke or explain the obvious humor (DO NOT SAY: "the comedic timing is genius", "masterfully uses comedic juxtaposition", "this scene portrays", "brilliant writing choice"). Viewers swipe away immediately if you lecture or praise the joke!
+❌ NEVER output generic life advice, moral lectures, or filler (e.g. DO NOT say "some days are just like that", "life is unpredictable").
+❌ NEVER describe obvious visual actions ("He is talking on the phone", "Peter walks in").
 
-✅ WHAT YOU MUST PROVIDE INSTEAD (PICK 1-2 STYLES FOR THIS VIDEO):
-1. **EXPLAIN THE CONTEXT / JOKE / HIDDEN DETAILS**: Point out a subtle detail 95% of people missed in the background, or explain the pop-culture reference/joke.
-2. **WITTY ROAST & ABSURDITY**: Comment on the sheer absurdity, bad decision making, or priceless facial expressions with sharp humor.
-3. **UNSETTLING / FASCINATING FACTS & BACKSTORY**: Give a quick backstory, real-world comparison, or insider trivia that makes the clip 10x more interesting.
-4. **RELATABLE REACTION & COMMENTARY**: Speak like a knowledgeable friend breaking down an insane moment ("Wait, if you look closely...", "Bro really thought...", "The worst part about this is...").
+✅ WHAT YOU MUST PROVIDE (VIRAL CURIOSITY GAP & INSIDER FACTS):
+1. **CONTROVERSY / BEHIND-THE-SCENES TRIVIA**: Reveal a surprising fact, broadcast history, or shocking context that makes viewers NEED to watch until the end.
+2. **HIGH-STAKES / UNHINGED FRAMING**: Frame the scene around the character's unhinged behavior, rule-breaking, or insane detail.
+3. **PUNCHY DENSITY**: Short, high-impact sentences. No fluff.
 
 ═══════════════════════════════════════
 HARD CONSTRAINTS:
 ═══════════════════════════════════════
 1. VIDEO DURATION: ${durationSec} seconds.
-2. WORD LIMIT: MAXIMUM ${maxWords} words for the on-screen commentary (hookText + scriptText). The closing outro (takeawayText) is SEPARATE and is NOT counted in this limit — give it room to breathe.
-3. FINISH EARLY: Commentary MUST end by second ${durationSec - 3}. Leave 3s clean gap at the end.
-4. SHORT SENTENCES: Max 12 words per sentence. Punchy fragments are encouraged.
+2. WORD LIMIT: MAXIMUM ${maxWords} words for on-screen commentary.
+3. SHORT SENTENCES: Max 12 words per sentence. Punchy, sharp delivery.
+4. NATURAL SPEECH: Use contractions ("he's", "that's", "gonna"), opinionated first-person words ("I", "look", "honestly"), no stiff essay phrasing.
 
 ═══════════════════════════════════════
-WRITE LIKE A REAL HUMAN — NOT AI (MANDATORY):
+1. HOOK (hookText) — EXACTLY 8-12 WORDS (2.5-3.5 SECONDS):
 ═══════════════════════════════════════
-The #1 goal is that this NEVER sounds AI-generated. Write how people actually TALK, not how AI writes.
-- Read every line in your head. If it sounds like an essay or a documentary narrator, REWRITE it.
-- ALWAYS use contractions: "he's", "that's", "gonna", "didn't", "you're", "there's". Never stiff full forms.
-- Speak in FIRST PERSON with a real opinion and reaction words: "I", "honestly", "look", "okay so", "not gonna lie", "wait".
-- Vary sentence length ON PURPOSE: slam a 2-word punch next to a longer line. One casual sentence fragment is good — it feels spontaneous and human.
-- It's okay to be slightly imperfect, casual, and opinionated. Real reactions are not grammatically perfect.
-- NEVER use these AI-tell words/phrases: "delve", "moreover", "furthermore", "in conclusion", "ultimately", "testament", "vibrant", "bustling", "whimsical", "navigate the complexities", "little did they know", "in a world where", "one thing is certain".
-- NO rigid 1-2-3 list phrasing and NO perfectly parallel sentences back-to-back — that instantly reads as AI.
-- Avoid over-punctuation. Write it the way you'd actually say it out loud to a friend.
+Must instantly hook curiosity with controversy, mystery, or an unhinged fact:
+✓ "Fox actually received hundreds of complaints for this 10-second joke."
+✓ "Peter Griffin literally committed three felonies in this one store visit."
+✓ "Almost nobody noticed the insane hidden detail in this scene."
+✓ "She really pulled off the darkest revenge on a live phone call."
+✓ (ID): "Adegan 10 detik ini beneran dapet ratusan komplain pas pertama tayang."
 
 ═══════════════════════════════════════
-HOOK (hookText) — FIRST 1-3 SECONDS:
+2. MID-SCENE INTERJECTION (middleInterjectionText) — 5-8 WORDS (1.5-2.0 SECONDS):
 ═══════════════════════════════════════
-Must stop the scroll immediately by introducing an intriguing hook, hidden detail, or hilarious angle.
-
-BANNED HOOK PHRASES:
-× "Stop scrolling" / "Don't scroll" / "Hey guys" / "Watch this"
-× "99% of people missed..." / "You won't believe..." / "Wait for it..."
-× Generic statements that apply to any video
-
-GREAT HOOK ENERGIES:
-✓ "The one detail everyone missed in this clip..."
-✓ "Bro really thought he was going to get away with this."
-✓ "There is a reason this video went viral instantly."
-✓ "Pay attention to what happens in the background right here."
+A sharp pattern-interrupt of sheer disbelief right at the punchline timestamp:
+✓ "Wait, she said that with zero hesitation?!"
+✓ "Hold on, did he actually just do that?!"
+✓ "Bro didn't even hesitate for a second!"
+✓ (ID): "Bentar, dia beneran ngomong gitu tanpa mikir?!"
 
 ═══════════════════════════════════════
-FULL SCRIPT (scriptText):
+3. TAKEAWAY / OUTRO TRIVIA (takeawayText) — 1-2 SHORT SENTENCES (10-15 WORDS, 3.5-4.5 SECONDS MAX):
 ═══════════════════════════════════════
-- Deliver punchy, transformative commentary based on the rules above.
-- Sound like a REAL human creator with personality, wit, and high energy.
-- NO filler words, NO visual redundancy. Every word must add entertainment or educational value.
+A quick, satisfying behind-the-scenes trivia punchline to close the video:
+✓ "The writers originally cut this scene because it was deemed too dark for broadcast."
+✓ "This scene actually set the record for the quickest escalation in the entire series."
+✓ (ID): "Fakta gilanya, lelucon gelap ini terinspirasi dari kejadian nyata salah satu penulisnya."
 
-═══════════════════════════════════════
-TAKEAWAY / OUTRO (takeawayText) — THE CLOSING PAYOFF (~9-14 SECONDS, DON'T RUSH IT):
-═══════════════════════════════════════
-This is the part that makes people feel something and hit the comments. A single one-liner is TOO FAST — the viewer never actually lands the point before the video ends. Give it real room.
-
-Write 3-5 full, flowing sentences (roughly 30-55 words) in this shape:
-1. LAND THE REAL TAKEAWAY clearly — the "so what" of the whole clip. Make the viewer go "ohh, THAT'S the point." Don't be vague; say what it actually means.
-2. ADD ONE MORE BEAT — a sharp observation, a relatable twist, or a tiny bit of context that makes the point stick and feel earned.
-3. END WITH A NATURAL QUESTION that genuinely pulls the audience in and asks for THEIR opinion — like you actually want to hear what they think. It must feel like something you'd really say to a friend, NOT a forced call-to-action.
-
-The closing question MUST match the audience's language (write it in casual Indonesian for an ID audience, natural English for US/UK).
-
-GREAT CLOSING ENERGIES (notice they LAND the point first, THEN invite opinions naturally):
-✓ "...and honestly, that's the part nobody talks about. We all like to think we'd stay calm in that moment — but would we really? I'm genuinely curious, would YOU have done the same thing? Tell me in the comments, I need to know I'm not the only one."
-✓ "...so yeah — tiny choice, massive consequences. Kinda makes you wonder how often this happens and we just don't notice. What would you have done in his shoes? Drop your take below, let's argue about it."
-✓ "...jadi intinya, jangan pernah remehin orang yang udah nggak punya apa-apa buat dijaga. Tapi mungkin gue yang salah baca situasinya. Menurut lo gimana? Komen dong, gue pengin tau kalian di tim yang mana."
-
-BANNED CLOSING PHRASES (too robotic / screams AI or spam): "comment below", "like and subscribe", "let us know in the comments", "don't forget to", "thanks for watching", "smash that like button".
-
-Return ONLY a JSON object (no markdown, no text outside JSON):
+Return ONLY a JSON object (no markdown, no backticks outside JSON):
 {
-  "hookText": "1-3 second hook — intriguing & specific",
-  "scriptText": "Full transformative voiceover script",
-  "takeawayText": "Longer ~9-14s closing outro (3-5 sentences): first land the real takeaway/message clearly, add one extra beat, then END with a natural question that asks the audience for their opinion in their own language — never robotic",
+  "hookText": "8-12 words controversy/trivia hook",
+  "scriptText": "Full transformative scene commentary",
+  "middleInterjectionText": "5-8 words sharp disbelief reaction",
+  "interruptionTimestampSec": 28,
+  "takeawayText": "1-2 short sentences (10-15 words) behind-the-scenes trivia punchline",
   "segments": [
     {
       "text": "Segment sentence",
@@ -264,7 +233,17 @@ Return ONLY a JSON object (no markdown, no text outside JSON):
     const { accessToken, projectId } = await this._getVertexAccessToken(serviceAccountPath);
     const parts = await this._extractKeyframesAsParts(videoPath, prompt);
 
-    const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash-002', 'gemini-1.5-flash-001', 'gemini-1.5-flash'];
+    const models = [
+      'gemini-3.7-flash',
+      'gemini-3.6-flash',
+      'gemini-3.0-flash',
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-2.0-flash-exp',
+      'gemini-1.5-flash-002',
+      'gemini-1.5-flash-001',
+      'gemini-1.5-flash',
+    ];
     let lastError: Error | null = null;
 
     // IMPORTANT: assemble the endpoint from parts. Do NOT inline the full URL as a
@@ -368,7 +347,16 @@ Return ONLY a JSON object (no markdown, no text outside JSON):
       const parsed = JSON.parse(cleaned);
       const hookText = parsed.hookText || 'Okay, you need to see this part.';
       const scriptText = parsed.scriptText || parsed.segments?.map((s: any) => s.text).join(' ') || hookText;
-      const takeawayText = parsed.takeawayText || "Yeah... I still can't fully wrap my head around this one, honestly. The more you think about it, the crazier it gets. So I gotta ask — what would YOU have done in that exact moment? Drop it in the comments, I really wanna know where you stand.";
+      const middleInterjectionText = parsed.middleInterjectionText?.trim() || '';
+      const takeawayText = parsed.takeawayText || "The brilliance here comes down to the comedic subversion of expectations. The show sets up a completely serious scenario, then hits you with deadpan anti-humor. How do you feel about this style of comedy writing? Let's discuss below.";
+
+      const durationSec = Math.max(5, Math.round(durationMs / 1000));
+      let interruptionTimestampSec: number | undefined = undefined;
+      if (typeof parsed.interruptionTimestampSec === 'number' && parsed.interruptionTimestampSec > 3 && parsed.interruptionTimestampSec < durationSec - 2) {
+        interruptionTimestampSec = Math.round(parsed.interruptionTimestampSec);
+      } else if (durationSec >= 15) {
+        interruptionTimestampSec = Math.round(durationSec * 0.60);
+      }
 
       let segments: CommentatorScriptSegment[] = parsed.segments || [];
       if (segments.length === 0) {
@@ -382,6 +370,8 @@ Return ONLY a JSON object (no markdown, no text outside JSON):
       return {
         hookText,
         scriptText,
+        middleInterjectionText,
+        interruptionTimestampSec,
         takeawayText,
         targetWpm: 155,
         estimatedDurationMs: durationMs,

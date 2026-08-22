@@ -117,7 +117,7 @@ export class Tracker {
       if (!fs.existsSync(outputJson)) return [];
 
       const data = JSON.parse(fs.readFileSync(outputJson, 'utf-8')) as {
-        frames: Array<{ frameIndex: number; timestampMs: number; cx: number; cy: number; hasFace: boolean; faceSpanW?: number }>;
+        frames: Array<{ frameIndex: number; timestampMs: number; cx: number; cy: number; hasFace: boolean; faceSpanW?: number; isCut?: boolean }>;
         avgCx?: number;
         avgCy?: number;
       };
@@ -137,6 +137,7 @@ export class Tracker {
           cy: (data.avgCy ?? f.cy) as number,
           hasFace: false,
           faceSpanW: 0,
+          isCut: f.isCut ?? false,
         }));
       }
 
@@ -147,6 +148,7 @@ export class Tracker {
         cy: f.cy,
         hasFace: f.hasFace,
         faceSpanW: f.faceSpanW ?? 0,
+        isCut: f.isCut ?? false,
       }));
     } catch (err) {
       try { fs.unlinkSync(outputJson); } catch { /* ignore */ }

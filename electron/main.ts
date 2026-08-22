@@ -519,19 +519,28 @@ Return ONLY a JSON object with this exact format:
       });
       const tokenData = await tokenRes.json() as { access_token: string };
 
-      const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${keyData.project_id}/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tokenData.access_token}` },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.7, maxOutputTokens: 4096, responseMimeType: 'application/json' },
-        }),
-      });
-      if (!response.ok) throw new Error(`Vertex AI error ${response.status}`);
-      const data = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-      const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-      const parsed = JSON.parse(responseText) as { title: string; description: string; tags: string[] };
+      const models = ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+      let lastResText = '';
+      for (const model of models) {
+        try {
+          const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${keyData.project_id}/locations/us-central1/publishers/google/models/${model}:generateContent`;
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tokenData.access_token}` },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }],
+              generationConfig: { temperature: 0.7, maxOutputTokens: 4096, responseMimeType: 'application/json' },
+            }),
+          });
+          if (response.ok) {
+            const data = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+            lastResText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+            if (lastResText) break;
+          }
+        } catch {}
+      }
+      if (!lastResText) throw new Error('All Gemini model candidates failed');
+      const parsed = JSON.parse(lastResText) as { title: string; description: string; tags: string[] };
       return parsed;
     } catch (err) {
       log.warn({ err }, 'AI metadata generation failed');
@@ -1290,7 +1299,42 @@ Return ONLY a JSON object with this exact format:
             const suffix = ' #Shorts';
             ytTitle = ytTitle.length + suffix.length > 100 ? ytTitle.substring(0, 100 - suffix.length) + suffix : ytTitle + suffix;
           }
-          uploadReq = { ...uploadReq, title: ytTitle };
+
+          // Build YPP-Compliant Description with Attribution & Fair Use Disclaimer
+          let ytDescription = uploadReq.description || '';
+          const project = projectRepo.findById(clip.projectId);
+          const autoAttribution = configManager.get('autoAttribution') ?? true;
+          const attributionTpl = configManager.get('attributionTemplate') || 'Sumber / Source: {title}\n{url}\nAll rights belong to the original creator.';
+          const autoFairUse = (uploadReq.autoFairUseDisclaimer ?? configManager.get('autoFairUseDisclaimer')) ?? true;
+          const fairUseTpl = configManager.get('fairUseDisclaimerTemplate') || '---\nOriginal Source: {url}\nTransformative Commentary & Educational Analysis.\nCreated in compliance with Fair Use principles for commentary and critique.';
+
+          if (project?.sourceUrl && !project.sourceUrl.startsWith('file://')) {
+            if (autoAttribution) {
+              const renderedAttr = attributionTpl
+                .replace(/\{title\}/g, project.title || 'Original Video')
+                .replace(/\{url\}/g, project.sourceUrl);
+              if (!ytDescription.includes(project.sourceUrl) && !ytDescription.includes('Sumber / Source:')) {
+                ytDescription = ytDescription ? `${ytDescription}\n\n${renderedAttr}` : renderedAttr;
+              }
+            }
+            if (autoFairUse) {
+              const renderedFairUse = fairUseTpl
+                .replace(/\{title\}/g, project.title || 'Original Video')
+                .replace(/\{url\}/g, project.sourceUrl);
+              if (!ytDescription.includes('Fair Use') && !ytDescription.includes('Transformative Commentary')) {
+                ytDescription = ytDescription ? `${ytDescription}\n\n${renderedFairUse}` : renderedFairUse;
+              }
+            }
+          }
+
+          const hasAlteredOrSyntheticContent = uploadReq.hasAlteredOrSyntheticContent ?? (configManager.get('hasAlteredOrSyntheticContent') ?? true);
+
+          uploadReq = {
+            ...uploadReq,
+            title: ytTitle,
+            description: ytDescription,
+            hasAlteredOrSyntheticContent,
+          };
 
           const youtubeUrl = await uploader.upload(uploadReq, clip.outputPath, accessToken, refreshToken, clientId, clientSecret);
           clipRepo.updateYouTubeUrl(req.clipId, youtubeUrl);
@@ -1540,48 +1584,50 @@ Return ONLY a JSON object with this exact format:
       if (!tokenRes.ok) throw new Error(`OAuth token exchange failed with status ${tokenRes.status}`);
       const tokenData = await tokenRes.json() as { access_token: string };
 
-      // Step 1: Use Gemini 1.5 Flash to generate a prompt for Imagen
-      const geminiUrl = `https://us-central1-aiplatform.googleapis.com/v1/projects/${keyData.project_id}/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent`;
-      
+      // Step 1: Use Gemini 3.7 Flash to generate a prompt for Imagen
       const cleanBase64Frame = frameBase64.replace(/^data:image\/[^;]+;base64,/, '');
+      const models = ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+      let imagenPrompt = '';
 
-      const geminiResponse = await fetch(geminiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tokenData.access_token}` },
-        body: JSON.stringify({
-          contents: [{
-            role: 'user',
-            parts: [
-              {
-                inlineData: {
-                  mimeType: 'image/jpeg',
-                  data: cleanBase64Frame
-                }
-              },
-              {
-                text: `Analyze this video frame (image) and the hook text: "${title}". Generate a single highly detailed image generation prompt for Google's Imagen 3.0 model that will generate a highly engaging, clickbait, professional, viral 9:16 vertical thumbnail background image matching the style and content of the frame, but optimized to make users want to click. 
+      for (const model of models) {
+        try {
+          const geminiUrl = `https://us-central1-aiplatform.googleapis.com/v1/projects/${keyData.project_id}/locations/us-central1/publishers/google/models/${model}:generateContent`;
+          const geminiResponse = await fetch(geminiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tokenData.access_token}` },
+            body: JSON.stringify({
+              contents: [{
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'image/jpeg',
+                      data: cleanBase64Frame
+                    }
+                  },
+                  {
+                    text: `Analyze this video frame (image) and the hook text: "${title}". Generate a single highly detailed image generation prompt for Google's Imagen 3.0 model that will generate a highly engaging, clickbait, professional, viral 9:16 vertical thumbnail background image matching the style and content of the frame, but optimized to make users want to click. 
 
 CRITICAL SAFETY RULES:
 - Do NOT include any trademarked names, copyrighted character names, franchise names, or show titles (like 'Family Guy', 'Stewie Griffin', 'Disney', 'Star Wars', etc.). 
-- Instead, describe the style and characters generically (e.g. use 'American adult animated sitcom style', 'a cartoon baby with a football-shaped head in red overalls').
-- Do NOT include any text or words in the prompt description (we will overlay the text separately).
+- Describe visual characteristics, artistic styles, lighting, emotion, camera angle, and atmosphere in descriptive generic terms (e.g. 'a cartoon man in glasses talking frantically on an old telephone in a dark room').
+- Keep the prompt under 100 words. Output ONLY the raw prompt text, no quotes, no markdown.`
+                  }
+                ]
+              }],
+              generationConfig: { temperature: 0.7, maxOutputTokens: 256 }
+            })
+          });
 
-The prompt should describe the scene, the central subject, the color palette, lighting (e.g. dramatic, studio, neon), and mood. Return ONLY the prompt text, no JSON, no formatting, no markdown.`
-              }
-            ]
-          }],
-          generationConfig: { temperature: 0.5, maxOutputTokens: 1000 },
-        }),
-      });
-
-      if (!geminiResponse.ok) {
-        const errText = await geminiResponse.text();
-        throw new Error(`Gemini prompt generation failed: ${errText}`);
+          if (geminiResponse.ok) {
+            const geminiData = await geminiResponse.json() as any;
+            imagenPrompt = geminiData.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+            if (imagenPrompt) break;
+          }
+        } catch {}
       }
 
-      const geminiData = await geminiResponse.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-      const rawPrompt = geminiData.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-      const promptText = rawPrompt.trim() || `A cinematic vertical 9:16 vertical background thumbnail for video topic: ${title}`;
+      const promptText = imagenPrompt || `A cinematic vertical 9:16 vertical background thumbnail for video topic: ${title}`;
       log.info({ promptText }, 'Generated prompt for Imagen');
 
       // Step 2: Call Imagen API to generate the image

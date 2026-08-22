@@ -38,8 +38,15 @@ export default function ExportQueuePage() {
   // The real project id is stored in sessionStorage by the navigation helper.
   const [projectId] = useState<string>(() => {
     if (typeof window === 'undefined') return params.id;
-    if (params.id !== '_') return params.id;
-    return readSessionId('pendingProjectId') ?? params.id;
+    if (params.id && params.id !== '_') {
+      try {
+        sessionStorage.setItem('pendingProjectId', params.id);
+        localStorage.setItem('pendingProjectId', params.id);
+      } catch {}
+      return params.id;
+    }
+    const stored = readSessionId('pendingProjectId');
+    return (stored && stored !== '_') ? stored : params.id;
   });
   const router  = useRouter();
   const { toasts, showToast, dismissToast } = useToast();
@@ -161,6 +168,20 @@ export default function ExportQueuePage() {
 
   const actions = (
     <div className="flex items-center gap-3">
+      {projectId && projectId !== '_' && (
+        <button
+          type="button"
+          onClick={() => electronNavigate(router, `/project/${projectId}`, { key: 'pendingProjectId', value: projectId })}
+          className={cn(
+            'flex items-center gap-1.5 rounded-md border border-accent/40 bg-accent/10 px-3 py-1.5',
+            'text-xs font-semibold text-accent',
+            'hover:bg-accent hover:text-accent-foreground transition-micro',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent'
+          )}
+        >
+          ← Back to Hooks
+        </button>
+      )}
       {statusSummary && (
         <span className="text-xs font-mono text-text-secondary">{statusSummary}</span>
       )}
@@ -186,6 +207,25 @@ export default function ExportQueuePage() {
       <AppShell title="Export Queue" actions={actions}>
         <div className="mx-auto max-w-2xl px-6 py-6 flex flex-col gap-4">
 
+          {/* Navigation Bar / Breadcrumb */}
+          {projectId && projectId !== '_' && (
+            <div className="flex items-center justify-between pb-1">
+              <button
+                type="button"
+                onClick={() => electronNavigate(router, `/project/${projectId}`, { key: 'pendingProjectId', value: projectId })}
+                className={cn(
+                  'inline-flex items-center gap-2 rounded-lg border border-border bg-surface px-3 py-1.5',
+                  'text-xs font-medium text-text-secondary',
+                  'hover:border-accent/40 hover:text-text-primary hover:bg-surface-elevated transition-micro group',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent'
+                )}
+              >
+                <span className="text-sm leading-none group-hover:-translate-x-0.5 transition-transform">←</span>
+                <span>Kembali ke Halaman Project / Clip Hook</span>
+              </button>
+            </div>
+          )}
+
           {/* Loading skeletons */}
           {loading && Array.from({ length: 4 }).map((_, i) => (
             <ClipItemSkeleton key={i} />
@@ -198,17 +238,32 @@ export default function ExportQueuePage() {
               <p className="text-xs text-text-secondary">
                 Go to a project, select a hook, and click Generate Clip.
               </p>
-              <button
-                type="button"
-                onClick={() => electronNavigate(router, '/')}
-                className={cn(
-                  'mt-2 rounded-md border border-border px-4 py-2 text-sm text-text-secondary',
-                  'hover:border-accent/40 hover:text-text-primary transition-micro',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent'
+              <div className="flex items-center gap-2 mt-2">
+                {projectId && projectId !== '_' && (
+                  <button
+                    type="button"
+                    onClick={() => electronNavigate(router, `/project/${projectId}`, { key: 'pendingProjectId', value: projectId })}
+                    className={cn(
+                      'rounded-md bg-accent px-4 py-2 text-xs font-semibold text-accent-foreground',
+                      'hover:bg-accent-hover transition-micro',
+                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent'
+                    )}
+                  >
+                    ← Back to Project (Hooks)
+                  </button>
                 )}
-              >
-                ← Back to Dashboard
-              </button>
+                <button
+                  type="button"
+                  onClick={() => electronNavigate(router, '/')}
+                  className={cn(
+                    'rounded-md border border-border px-4 py-2 text-xs text-text-secondary',
+                    'hover:border-accent/40 hover:text-text-primary transition-micro',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent'
+                  )}
+                >
+                  Dashboard
+                </button>
+              </div>
             </div>
           )}
 

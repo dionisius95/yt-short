@@ -42,6 +42,9 @@ function buildDefaults(): AppSettings {
     speakerAudioPath: '',
     autoAttribution: true,
     attributionTemplate: 'Sumber / Source: {title}\n{url}\nAll rights belong to the original creator.',
+    autoFairUseDisclaimer: true,
+    fairUseDisclaimerTemplate: '---\nOriginal Source: {url}\nTransformative Commentary & Educational Analysis.\nCreated in compliance with Fair Use principles for commentary and critique.',
+    hasAlteredOrSyntheticContent: true,
     defaultAudioMode: 'keep',
     backgroundMusicPath: '',
     musicVolume: 0.8,
@@ -60,6 +63,16 @@ function buildDefaults(): AppSettings {
     telegramSession: '',
     accounts: [],
     previewPresets: [],
+    pexelsApiKey: '',
+    pixabayApiKey: '',
+    brollConfig: {
+      enabled: true,
+      category: 'contextual',
+      mode: 'fullscreen_cutaway',
+      customDir: '',
+      frequencySec: 6,
+      durationSec: 2.5,
+    },
   };
 }
 
@@ -110,6 +123,12 @@ export class ConfigManager {
         speakerAudioPath: { type: 'string' },
         autoAttribution: { type: 'boolean' },
         attributionTemplate: { type: 'string' },
+        autoFairUseDisclaimer: { type: 'boolean' },
+        fairUseDisclaimerTemplate: { type: 'string' },
+        hasAlteredOrSyntheticContent: { type: 'boolean' },
+        pexelsApiKey: { type: 'string' },
+        pixabayApiKey: { type: 'string' },
+        brollConfig: { type: 'object' },
         defaultAudioMode: {
           type: 'string',
           enum: ['keep', 'mute', 'replace'],

@@ -38,11 +38,13 @@ import shutil
 
 async def generate_tts_segments(
     segments, voice, tmp_dir, google_tts_key=None,
-    vertex_access_token=None, vertex_project_id=None
+    gemini_api_key=None,
+    vertex_access_token=None, vertex_project_id=None,
+    **kwargs
 ):
     """
     Generate TTS audio for each text segment.
-    Uses Gemini API on Vertex AI if vertex_access_token is provided.
+    Uses Gemini API (Studio API key or Vertex AI token) if provided.
     Uses Google Cloud TTS if api_key provided, falls back to edge-tts.
     Returns list of (startMs, endMs, wav_path).
     """
@@ -57,7 +59,9 @@ async def generate_tts_segments(
 
         # If it is a Gemini voice
         if voice.startswith('gemini-'):
-            if vertex_access_token and vertex_project_id:
+            if gemini_api_key:
+                success = await _gemini_tts_studio(text, voice, mp3_path, gemini_api_key)
+            elif vertex_access_token and vertex_project_id:
                 success = await _gemini_tts(text, voice, mp3_path, vertex_access_token, vertex_project_id)
             
             if not success:

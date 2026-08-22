@@ -190,9 +190,11 @@ export class AvatarCompositor {
 			: new Error('failed to replace output with avatar composite (file locked)');
 	}
 
-	/** Overlay position expressions using FFmpeg main (W/H) and overlay (w/h) vars. */
+	/** Overlay position expressions using FFmpeg main (W/H) and overlay (w/h) vars with YouTube Shorts safe margin. */
 	private position(a: AvatarOverlay): { x: string; y: string } {
 		const m = a.margin ?? 48;
+		// YouTube Shorts mobile UI safe zone: bottom 320px is covered by channel info, sound, and subscribe button
+		const bottomSafeMargin = Math.max(m, 320);
 		if (typeof a.x === 'number' && typeof a.y === 'number') {
 			return { x: `${a.x}`, y: `${a.y}` };
 		}
@@ -202,13 +204,13 @@ export class AvatarCompositor {
 			case 'top-right':
 				return { x: `W-w-${m}`, y: `${m}` };
 			case 'bottom-left':
-				return { x: `${m}`, y: `H-h-${m}` };
+				return { x: `${m}`, y: `H-h-${bottomSafeMargin}` };
 			case 'bottom-right':
-				return { x: `W-w-${m}`, y: `H-h-${m}` };
+				return { x: `W-w-${m}`, y: `H-h-${bottomSafeMargin}` };
 			case 'center':
 				return { x: `(W-w)/2`, y: `(H-h)/2` };
 			default:
-				return { x: `W-w-${m}`, y: `${m}` };
+				return { x: `(W-w)/2`, y: `H-h-${bottomSafeMargin}` };
 		}
 	}
 

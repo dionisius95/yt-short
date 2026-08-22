@@ -103,6 +103,7 @@ export function AvatarControls({ value, onChange }: AvatarControlsProps) {
   const [includeImageInPreset, setIncludeImageInPreset] = useState(true);
   const [savingPreset, setSavingPreset] = useState(false);
   const [deletingPreset, setDeletingPreset] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Load custom presets on mount
   useEffect(() => {
@@ -114,7 +115,9 @@ export function AvatarControls({ value, onChange }: AvatarControlsProps) {
           setCustomPresets(list);
         }
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.error('Failed to load avatar presets:', err);
+      });
     return () => {
       active = false;
     };
@@ -145,6 +148,7 @@ export function AvatarControls({ value, onChange }: AvatarControlsProps) {
   const handleSavePresetSubmit = async () => {
     if (!presetNameInput.trim()) return;
     setSavingPreset(true);
+    setSaveError(null);
     try {
       const newPreset: AvatarPreset = {
         id: `avatar_preset_${Date.now()}`,
@@ -169,8 +173,10 @@ export function AvatarControls({ value, onChange }: AvatarControlsProps) {
       setSelectedPresetId(newPreset.id);
       setShowSavePresetModal(false);
       setPresetNameInput('');
-    } catch (err) {
+      setSaveError(null);
+    } catch (err: any) {
       console.error('Failed to save avatar preset:', err);
+      setSaveError(err?.message || 'Gagal menyimpan preset ke database.');
     } finally {
       setSavingPreset(false);
     }
@@ -293,7 +299,10 @@ export function AvatarControls({ value, onChange }: AvatarControlsProps) {
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
-                  onClick={() => setShowSavePresetModal(true)}
+                  onClick={() => {
+                    setSaveError(null);
+                    setShowSavePresetModal(true);
+                  }}
                   className="rounded-md bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-500 transition-colors shadow-sm"
                 >
                   + Simpan Preset
@@ -563,7 +572,7 @@ export function AvatarControls({ value, onChange }: AvatarControlsProps) {
 
       {/* Save Custom Preset Modal */}
       {showSavePresetModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-fade-in">
           <div className="w-full max-w-md rounded-xl border border-white/15 bg-surface-elevated p-5 shadow-2xl flex flex-col gap-4">
             <div className="flex items-center justify-between border-b border-white/10 pb-3">
               <div className="flex items-center gap-2">
@@ -580,6 +589,12 @@ export function AvatarControls({ value, onChange }: AvatarControlsProps) {
                 ✕
               </button>
             </div>
+
+            {saveError && (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-2.5 text-xs text-red-300">
+                {saveError}
+              </div>
+            )}
 
             <div className="flex flex-col gap-3">
               <div className="flex flex-col gap-1.5">

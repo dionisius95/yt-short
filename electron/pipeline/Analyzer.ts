@@ -264,7 +264,17 @@ async function _callGeminiVertexAI(
   if (!tokenResponse.ok) throw new Error(`Token exchange failed: ${tokenResponse.status}`);
   const tokenData = await tokenResponse.json() as { access_token: string };
 
-  const models = ['gemini-3.6-flash', 'gemini-3.0-flash', 'gemini-1.5-flash-002', 'gemini-1.5-flash-001', 'gemini-2.5-flash', 'gemini-2.0-flash-001', 'gemini-1.5-flash'];
+  const models = [
+    'gemini-3.7-flash',
+    'gemini-3.6-flash',
+    'gemini-3.0-flash',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-2.0-flash-exp',
+    'gemini-1.5-flash-002',
+    'gemini-1.5-flash-001',
+    'gemini-1.5-flash',
+  ];
   let lastErr: Error | null = null;
 
   for (const model of models) {

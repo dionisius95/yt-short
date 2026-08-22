@@ -43,8 +43,15 @@ export default function ProjectViewPage() {
   // mismatch.
   const [projectId] = useState<string>(() => {
     if (typeof window === 'undefined') return params.id;
-    if (params.id !== '_') return params.id;
-    return readSessionId('pendingProjectId') ?? params.id;
+    if (params.id && params.id !== '_') {
+      try {
+        sessionStorage.setItem('pendingProjectId', params.id);
+        localStorage.setItem('pendingProjectId', params.id);
+      } catch {}
+      return params.id;
+    }
+    const stored = readSessionId('pendingProjectId');
+    return (stored && stored !== '_') ? stored : params.id;
   });
 
   const { project, hooks, transcript, loading, error, refresh } = useProject(projectId);

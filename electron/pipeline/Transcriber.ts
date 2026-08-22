@@ -790,13 +790,18 @@ export class Transcriber {
       ?? data.metadata?.detected_language
       ?? language;
 
-    const words: import('../../shared/types').TranscriptWord[] = rawWords.map((w) => ({
-      word:       w.word,
-      startMs:    Math.round(w.start * 1000),
-      endMs:      Math.round(w.end   * 1000),
-      confidence: w.confidence,
-      ...(w.speaker !== undefined ? { speakerId: `SPEAKER_${String(w.speaker).padStart(2, '0')}` } : {}),
-    }));
+    const words: import('../../shared/types').TranscriptWord[] = rawWords.map((w) => {
+      const sMs = Math.round(w.start * 1000);
+      const rawEndMs = Math.round(w.end * 1000);
+      const eMs = (rawEndMs > sMs && rawEndMs - sMs <= 4000) ? rawEndMs : sMs + 800;
+      return {
+        word:       w.word,
+        startMs:    sMs,
+        endMs:      eMs,
+        confidence: w.confidence,
+        ...(w.speaker !== undefined ? { speakerId: `SPEAKER_${String(w.speaker).padStart(2, '0')}` } : {}),
+      };
+    });
 
     const speakerCount = new Set(rawWords.map((w) => w.speaker).filter((s) => s !== undefined)).size;
     log.info({ projectId, wordCount: words.length, detectedLang, speakerCount }, 'Deepgram transcription complete');

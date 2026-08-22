@@ -39,10 +39,13 @@ export function electronNavigate(
   href: string,
   storeId?: { key: string; value: string }
 ): void {
-  if (isElectronProduction()) {
-    if (storeId) {
+  if (storeId && typeof window !== 'undefined') {
+    try {
       sessionStorage.setItem(storeId.key, storeId.value);
-    }
+      localStorage.setItem(storeId.key, storeId.value);
+    } catch {}
+  }
+  if (isElectronProduction()) {
     // Map logical route → static shell path
     const shellPath = toShellPath(href);
     window.location.href = shellPath;
@@ -71,12 +74,15 @@ function toShellPath(href: string): string {
 }
 
 /**
- * readSessionId — read and clear a stored navigation ID from sessionStorage.
- * Returns null if not found or not in a browser environment.
+ * readSessionId — read stored navigation ID from sessionStorage with localStorage fallback.
+ * Preserves the stored ID so page refreshes and multi-step navigation never lose project ID.
  */
 export function readSessionId(key: string): string | null {
   if (typeof window === 'undefined') return null;
-  const value = sessionStorage.getItem(key);
-  if (value) sessionStorage.removeItem(key);
-  return value;
+  try {
+    const val = sessionStorage.getItem(key) || localStorage.getItem(key);
+    return val && val !== '_' ? val : null;
+  } catch {
+    return null;
+  }
 }

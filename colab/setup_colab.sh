@@ -14,15 +14,39 @@ apt-get -qq update >/dev/null 2>&1 || true
 apt-get -qq install -y ffmpeg git-lfs >/dev/null 2>&1 || true
 
 echo "==> Python deps (tanpa pin yang bisa merusak numpy/torch VoxCPM)"
+# 1) Deps standar dengan pre-built wheels
 pip -q install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors \
-    face-alignment kornia pydub librosa numba resampy gfpgan basicsr scikit-image >/dev/null 2>&1 || \
-  pip -q install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors face-alignment kornia pydub librosa numba resampy gfpgan basicsr scikit-image || true
+    face-alignment kornia pydub librosa numba resampy scikit-image >/dev/null 2>&1 || \
+  pip install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors face-alignment kornia pydub librosa numba resampy scikit-image
+
+# 2) basicsr & gfpgan (WAJIB --no-build-isolation karena setup.py mengakses torch dari environment)
+echo "==> Install basicsr & gfpgan (--no-build-isolation)"
+pip -q install --no-build-isolation basicsr gfpgan >/dev/null 2>&1 || \
+  pip -q install --no-build-isolation --no-deps basicsr gfpgan >/dev/null 2>&1 || \
+  pip -q install --no-deps basicsr gfpgan >/dev/null 2>&1 || true
 
 echo "==> Hapus-background deps (rembg + onnxruntime GPU, fallback CPU)"
-# rembg + onnxruntime-gpu (u2net_human_seg) untuk toggle "Hapus Background".
-# Model diunduh otomatis saat pertama dipakai. Fallback ke onnxruntime CPU.
+# rembg + onnxruntime (u2net_human_seg) untuk toggle "Hapus Background".
 pip -q install rembg onnxruntime-gpu >/dev/null 2>&1 || \
-  pip -q install rembg onnxruntime >/dev/null 2>&1 || true
+  pip -q install rembg onnxruntime >/dev/null 2>&1 || \
+  pip -q install rembg >/dev/null 2>&1 || true
+
+# Pre-download model u2net_human_seg & test session provider (GPU -> CPU fallback)
+echo "==> Warmup rembg session & model"
+python3 - <<'REMBGEOF'
+try:
+    from rembg import new_session
+    import os
+    model = os.environ.get("REMBG_MODEL", "u2net_human_seg")
+    try:
+        sess = new_session(model, providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+        print("[rembg] Warmup OK: provider GPU/CPU (model:", model, ")")
+    except Exception as egpu:
+        sess = new_session(model, providers=['CPUExecutionProvider'])
+        print("[rembg] Warmup OK: fallback CPU (model:", model, ")")
+except Exception as e:
+    print("[rembg] Warmup WARN (akan dicoba lagi saat request):", e)
+REMBGEOF
 
 # --------- SadTalker (mode talk: A & C) ---------
 if [ ! -d "$WORK/SadTalker" ]; then
