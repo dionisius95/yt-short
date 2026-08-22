@@ -268,64 +268,101 @@ export class CommentatorPipeline {
 
         if (is3Segment) {
           // Segment A (hook) -> talk
-          clips.segmentA = await this.avatarGen.generate({
-            imagePath: req.avatar.imagePath,
-            audioPath: ttsTrackPath,
-            mode: 'talk',
-            baseUrl,
-            outputPath: path.join(dir, 'avatar_segA.mp4'),
-            removeBackground: req.avatar.removeBackground,
-          });
+          try {
+            this._emitProgress(84, 'avatar', 'Generating Segment A avatar clip...');
+            clips.segmentA = await this.avatarGen.generate({
+              imagePath: req.avatar.imagePath,
+              audioPath: ttsTrackPath,
+              mode: 'talk',
+              baseUrl,
+              outputPath: path.join(dir, 'avatar_segA.mp4'),
+              removeBackground: req.avatar.removeBackground,
+            });
+            log.info({ path: clips.segmentA }, 'Segment A avatar generated successfully');
+          } catch (errA) {
+            log.warn({ errA }, 'Failed to generate Segment A avatar clip');
+          }
 
           // Segment C (takeaway) -> talk
           if (takeawayTtsPath) {
-            clips.segmentC = await this.avatarGen.generate({
-              imagePath: req.avatar.imagePath,
-              audioPath: takeawayTtsPath,
-              mode: 'talk',
-              baseUrl,
-              outputPath: path.join(dir, 'avatar_segC.mp4'),
-              removeBackground: req.avatar.removeBackground,
-            });
+            try {
+              this._emitProgress(85, 'avatar', 'Generating Segment C avatar clip...');
+              clips.segmentC = await this.avatarGen.generate({
+                imagePath: req.avatar.imagePath,
+                audioPath: takeawayTtsPath,
+                mode: 'talk',
+                baseUrl,
+                outputPath: path.join(dir, 'avatar_segC.mp4'),
+                removeBackground: req.avatar.removeBackground,
+              });
+              log.info({ path: clips.segmentC }, 'Segment C avatar generated successfully');
+            } catch (errC) {
+              log.warn({ errC }, 'Failed to generate Segment C avatar clip');
+            }
           }
 
-          // Segment B (replay idle watch)
-          clips.segmentB = await this.avatarGen.generate({
-            imagePath: req.avatar.imagePath,
-            audioPath: null,
-            mode: 'idle',
-            baseUrl,
-            outputPath: path.join(dir, 'avatar_segB_idle.mp4'),
-            durationSec: Math.max(1, Math.round(durationMs / 1000)),
-            removeBackground: req.avatar.removeBackground,
-          });
+          // Segment B (replay idle watch, capped to max 10s for fast render & looped by compositor)
+          try {
+            this._emitProgress(85, 'avatar', 'Generating Segment B idle avatar clip...');
+            clips.segmentB = await this.avatarGen.generate({
+              imagePath: req.avatar.imagePath,
+              audioPath: null,
+              mode: 'idle',
+              baseUrl,
+              outputPath: path.join(dir, 'avatar_segB_idle.mp4'),
+              durationSec: Math.min(10, Math.max(1, Math.round(durationMs / 1000))),
+              removeBackground: req.avatar.removeBackground,
+            });
+            log.info({ path: clips.segmentB }, 'Segment B idle avatar generated successfully');
+          } catch (errB) {
+            log.warn({ errB }, 'Failed to generate Segment B idle avatar clip (will hold static frame or skip)');
+          }
 
           // Segment Jeda (mid-scene vocal interruption -> talk)
           if (reactionTtsPath && fs.existsSync(reactionTtsPath)) {
-            clips.segmentJeda = await this.avatarGen.generate({
-              imagePath: req.avatar.imagePath,
-              audioPath: reactionTtsPath,
-              mode: 'talk',
-              baseUrl,
-              outputPath: path.join(dir, 'avatar_segB_jeda.mp4'),
-              durationSec: Math.max(1, Math.round((actualReactionDurMs || 2800) / 1000)),
-              removeBackground: req.avatar.removeBackground,
-            });
+            try {
+              this._emitProgress(86, 'avatar', 'Generating Segment Jeda avatar clip...');
+              clips.segmentJeda = await this.avatarGen.generate({
+                imagePath: req.avatar.imagePath,
+                audioPath: reactionTtsPath,
+                mode: 'talk',
+                baseUrl,
+                outputPath: path.join(dir, 'avatar_segB_jeda.mp4'),
+                durationSec: Math.max(1, Math.round((actualReactionDurMs || 2800) / 1000)),
+                removeBackground: req.avatar.removeBackground,
+              });
+              log.info({ path: clips.segmentJeda }, 'Segment Jeda avatar generated successfully');
+            } catch (errJ) {
+              log.warn({ errJ }, 'Failed to generate Segment Jeda avatar clip');
+            }
           }
         } else {
           // Full Commentary Mode -> single continuous talking avatar across the video
-          clips.segmentA = await this.avatarGen.generate({
-            imagePath: req.avatar.imagePath,
-            audioPath: ttsTrackPath,
-            mode: 'talk',
-            baseUrl,
-            outputPath: path.join(dir, 'avatar_full.mp4'),
-            durationSec: Math.max(1, Math.round(durationMs / 1000)),
-            removeBackground: req.avatar.removeBackground,
-          });
+          try {
+            this._emitProgress(84, 'avatar', 'Generating Full commentary avatar clip...');
+            clips.segmentA = await this.avatarGen.generate({
+              imagePath: req.avatar.imagePath,
+              audioPath: ttsTrackPath,
+              mode: 'talk',
+              baseUrl,
+              outputPath: path.join(dir, 'avatar_full.mp4'),
+              durationSec: Math.max(1, Math.round(durationMs / 1000)),
+              removeBackground: req.avatar.removeBackground,
+            });
+            log.info({ path: clips.segmentA }, 'Full commentary avatar generated successfully');
+          } catch (errFull) {
+            log.warn({ errFull }, 'Failed to generate Full commentary avatar clip');
+          }
         }
 
-        avatarClips = clips;
+        const hasAnyClip = !!(clips.segmentA || clips.segmentB || clips.segmentC || clips.segmentJeda);
+        if (hasAnyClip) {
+          avatarClips = clips;
+          log.info({ clips: Object.keys(clips).filter(k => (clips as any)[k]) }, 'Avatar clips available for compositing');
+        } else {
+          avatarErrorMsg = 'All avatar segment clips failed to generate';
+          avatarClips = undefined;
+        }
       } catch (avErr) {
         avatarErrorMsg = avErr instanceof Error ? avErr.message : String(avErr);
         log.error({ avErr, avatarColabUrl: AvatarGenerator.resolveBaseUrl(req.avatar, apiKeys.xttsColabUrl) }, 'Avatar generation failed; rendering without avatar');
