@@ -9,6 +9,7 @@
 
 import path from 'path';
 import fs from 'fs';
+import { spawn } from 'child_process';
 import { CommentatorAnalyzer } from './CommentatorAnalyzer';
 import { Dubber } from './Dubber';
 import { Processor } from './Processor';
@@ -20,6 +21,19 @@ import type { CommentatorRequest, CommentatorResult, TranscriptWord, WhisperMode
 import type { AvatarClips } from '../../shared/avatarTypes';
 
 const log = createLogger('CommentatorPipeline');
+
+function runFfmpeg(args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    proc.stderr.on('data', (c: Buffer) => { stderr += c.toString(); });
+    proc.on('error', (e) => reject(new Error(`ffmpeg spawn error: ${e.message}`)));
+    proc.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg exited with code ${code}: ${stderr.slice(-300)}`));
+    });
+  });
+}
 
 export class CommentatorPipeline {
   private analyzer = new CommentatorAnalyzer();
@@ -253,9 +267,7 @@ export class CommentatorPipeline {
       }
     }
 
-    // 5d. Talking-avatar clips (ADDITIVE, guarded). Only for 3-segment mode.
-    //     A/C = talk (lip-sync from TTS), B = idle (silent, blinking), Jeda = talk. Any
-    //     failure leaves avatarClips undefined so the render is unchanged.
+    // 5d. Talking Avatar generation (ADDITIVE, guarded).
     let avatarErrorMsg = '';
     let avatarClips: AvatarClips | undefined;
     if (req.avatar?.enabled && req.avatar.imagePath && fs.existsSync(req.avatar.imagePath)) {
@@ -267,12 +279,29 @@ export class CommentatorPipeline {
         const clips: AvatarClips = {};
 
         if (is3Segment) {
-          // Segment A (hook) -> talk
+          // Segment A (hook) -> talk: Match exact video audio (1.15x tempo + 1.2s J-Cut delay)
+          let segAAudioPath = ttsTrackPath;
+          try {
+            const transformedAudioA = path.join(dir, `avatar_audio_segA_${Date.now()}.wav`);
+            await runFfmpeg([
+              '-y',
+              '-i', ttsTrackPath,
+              '-af', 'atempo=1.15,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=1200|1200',
+              '-c:a', 'pcm_s16le', '-ar', '16000', '-ac', '1',
+              transformedAudioA,
+            ]);
+            if (fs.existsSync(transformedAudioA) && fs.statSync(transformedAudioA).size > 1000) {
+              segAAudioPath = transformedAudioA;
+            }
+          } catch (errTransA) {
+            log.warn({ errTransA }, 'Failed to transform Segment A avatar driving audio; using raw TTS');
+          }
+
           try {
             this._emitProgress(84, 'avatar', 'Generating Segment A avatar clip...');
             clips.segmentA = await this.avatarGen.generate({
               imagePath: req.avatar.imagePath,
-              audioPath: ttsTrackPath,
+              audioPath: segAAudioPath,
               mode: 'talk',
               baseUrl,
               outputPath: path.join(dir, 'avatar_segA.mp4'),
@@ -281,15 +310,36 @@ export class CommentatorPipeline {
             log.info({ path: clips.segmentA }, 'Segment A avatar generated successfully');
           } catch (errA) {
             log.warn({ errA }, 'Failed to generate Segment A avatar clip');
+          } finally {
+            if (segAAudioPath !== ttsTrackPath) {
+              try { fs.unlinkSync(segAAudioPath); } catch {}
+            }
           }
 
-          // Segment C (takeaway) -> talk
+          // Segment C (takeaway) -> talk: Match exact video audio (1.15x tempo)
           if (takeawayTtsPath) {
+            let segCAudioPath = takeawayTtsPath;
+            try {
+              const transformedAudioC = path.join(dir, `avatar_audio_segC_${Date.now()}.wav`);
+              await runFfmpeg([
+                '-y',
+                '-i', takeawayTtsPath,
+                '-af', 'atempo=1.15,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo',
+                '-c:a', 'pcm_s16le', '-ar', '16000', '-ac', '1',
+                transformedAudioC,
+              ]);
+              if (fs.existsSync(transformedAudioC) && fs.statSync(transformedAudioC).size > 1000) {
+                segCAudioPath = transformedAudioC;
+              }
+            } catch (errTransC) {
+              log.warn({ errTransC }, 'Failed to transform Segment C avatar driving audio; using raw TTS');
+            }
+
             try {
               this._emitProgress(85, 'avatar', 'Generating Segment C avatar clip...');
               clips.segmentC = await this.avatarGen.generate({
                 imagePath: req.avatar.imagePath,
-                audioPath: takeawayTtsPath,
+                audioPath: segCAudioPath,
                 mode: 'talk',
                 baseUrl,
                 outputPath: path.join(dir, 'avatar_segC.mp4'),
@@ -298,6 +348,10 @@ export class CommentatorPipeline {
               log.info({ path: clips.segmentC }, 'Segment C avatar generated successfully');
             } catch (errC) {
               log.warn({ errC }, 'Failed to generate Segment C avatar clip');
+            } finally {
+              if (segCAudioPath !== takeawayTtsPath) {
+                try { fs.unlinkSync(segCAudioPath); } catch {}
+              }
             }
           }
 
@@ -318,13 +372,30 @@ export class CommentatorPipeline {
             log.warn({ errB }, 'Failed to generate Segment B idle avatar clip (will hold static frame or skip)');
           }
 
-          // Segment Jeda (mid-scene vocal interruption -> talk)
+          // Segment Jeda (mid-scene vocal interruption -> talk: 1.15x tempo)
           if (reactionTtsPath && fs.existsSync(reactionTtsPath)) {
+            let segJedaAudioPath = reactionTtsPath;
+            try {
+              const transformedAudioJeda = path.join(dir, `avatar_audio_jeda_${Date.now()}.wav`);
+              await runFfmpeg([
+                '-y',
+                '-i', reactionTtsPath,
+                '-af', 'atempo=1.15,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo',
+                '-c:a', 'pcm_s16le', '-ar', '16000', '-ac', '1',
+                transformedAudioJeda,
+              ]);
+              if (fs.existsSync(transformedAudioJeda) && fs.statSync(transformedAudioJeda).size > 1000) {
+                segJedaAudioPath = transformedAudioJeda;
+              }
+            } catch (errTransJeda) {
+              log.warn({ errTransJeda }, 'Failed to transform Segment Jeda avatar driving audio; using raw TTS');
+            }
+
             try {
               this._emitProgress(86, 'avatar', 'Generating Segment Jeda avatar clip...');
               clips.segmentJeda = await this.avatarGen.generate({
                 imagePath: req.avatar.imagePath,
-                audioPath: reactionTtsPath,
+                audioPath: segJedaAudioPath,
                 mode: 'talk',
                 baseUrl,
                 outputPath: path.join(dir, 'avatar_segB_jeda.mp4'),
@@ -334,6 +405,10 @@ export class CommentatorPipeline {
               log.info({ path: clips.segmentJeda }, 'Segment Jeda avatar generated successfully');
             } catch (errJ) {
               log.warn({ errJ }, 'Failed to generate Segment Jeda avatar clip');
+            } finally {
+              if (segJedaAudioPath !== reactionTtsPath) {
+                try { fs.unlinkSync(segJedaAudioPath); } catch {}
+              }
             }
           }
         } else {
@@ -475,7 +550,7 @@ export class CommentatorPipeline {
               : Math.round(durationMs * 0.60);
             interruptionMs = Math.max(5000, Math.min(durationMs - 4000, interruptionMs));
             const durB1 = interruptionMs / 1000;
-            const durJeda = Math.max(1.8, (Math.ceil((actualReactionDurMs || 2800) / 1.15) + 300) / 1000);
+            const durJeda = Math.max(0.8, (Math.ceil((actualReactionDurMs || 2800) / 1.15) + 150) / 1000);
             const durB2 = (durationMs - interruptionMs) / 1000;
 
             // B1 (Idle)
@@ -502,13 +577,31 @@ export class CommentatorPipeline {
             cursor += ((durationMs / 1000) - tDur);
           }
 
+          let totalVideoDurSec = durationMs / 1000;
+          try {
+            totalVideoDurSec = (await this.processor.getVideoDurationMs(outputPath)) / 1000;
+          } catch {}
+
           if (avatarClips.segmentC) {
-            segments.push({ clipPath: avatarClips.segmentC, startSec: cursor, endSec: cursor + durC - tDur / 2 });
+            // Extend Segment C avatar overlay until the video finishes completely
+            segments.push({
+              clipPath: avatarClips.segmentC,
+              startSec: cursor,
+              endSec: Math.max(cursor + 0.5, totalVideoDurSec + 5.0),
+            });
           }
         } else {
-          // Full Commentary Mode
+          // Full Commentary Mode -> hold until end of video
+          let totalVideoDurSec = durationMs / 1000;
+          try {
+            totalVideoDurSec = (await this.processor.getVideoDurationMs(outputPath)) / 1000;
+          } catch {}
           if (avatarClips.segmentA) {
-            segments.push({ clipPath: avatarClips.segmentA, startSec: 0, endSec: durationMs / 1000 });
+            segments.push({
+              clipPath: avatarClips.segmentA,
+              startSec: 0,
+              endSec: Math.max(1.0, totalVideoDurSec + 5.0),
+            });
           }
         }
 

@@ -3303,7 +3303,7 @@ export class Processor {
       try {
         reactionAudioDurMs = (await this.getVideoDurationMs(reactionTts!)) / 1.15;
       } catch {}
-      const freezeDurSec = Math.max(1.8, (Math.ceil(reactionAudioDurMs) + 300) / 1000);
+      const freezeDurSec = Math.max(0.8, (Math.ceil(reactionAudioDurMs) + 150) / 1000);
       const freezeDurMs = Math.round(freezeDurSec * 1000);
 
       // Build Subtitles for Segment Jeda scaled by 1.15x

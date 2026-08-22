@@ -100,7 +100,7 @@ export class AvatarCompositor {
 			const pos = this.position(avatar);
 			const out = i === segments.length - 1 ? '[vout]' : `[v${i}]`;
 			filters.push(
-				`${last}[${av}]overlay=${pos.x}:${pos.y}:` +
+				`${last}[${av}]overlay=${pos.x}:${pos.y}:format=auto:` +
 					`enable='between(t\\,${seg.startSec.toFixed(3)}\\,${seg.endSec.toFixed(3)})'${out}`,
 			);
 			last = `[v${i}]`;

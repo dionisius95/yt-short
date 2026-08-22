@@ -473,6 +473,35 @@ def _build_random_idle(units, out_dir: Path, out: Path, seconds: float, fps: int
     return out
 
 
+def _find_idle_driving_sources():
+    """Cari sumber driving kedip/senyum terbaik yang tersedia."""
+    candidates = []
+    if IDLE_DRIVING:
+        candidates.append(Path(IDLE_DRIVING))
+    candidates.extend([
+        Path('/content/assets/idle_driving.mp4'),
+        Path('/content/assets/idle_blink.mp4'),
+        WORKDIR.parent / 'assets' / 'idle_driving.mp4',
+        WORKDIR.parent / 'assets' / 'idle_blink.mp4',
+        Path('./assets/idle_driving.mp4'),
+        Path('./assets/idle_blink.mp4'),
+        LIVEPORTRAIT_DIR / 'assets' / 'examples' / 'driving' / 'd14.mp4',
+        LIVEPORTRAIT_DIR / 'assets' / 'examples' / 'driving' / 'd0.mp4',
+    ])
+    blink_src = None
+    smile_src = None
+    for p in candidates:
+        if p and p.exists() and p.stat().st_size > 1000:
+            blink_src = p
+            p_smile = p.parent / 'idle_smile.mp4'
+            if p_smile.exists() and p_smile.stat().st_size > 1000:
+                smile_src = p_smile
+            elif (LIVEPORTRAIT_DIR / 'assets' / 'examples' / 'driving' / 'd9.mp4').exists():
+                smile_src = LIVEPORTRAIT_DIR / 'assets' / 'examples' / 'driving' / 'd9.mp4'
+            break
+    return blink_src, smile_src
+
+
 def _render_liveportrait_idle(image: Path, out_dir: Path, seconds: float, fps: int) -> Path:
     """Idle Segmen B natural: kedip SESEKALI + senyum tipis SESEKALI, ritme ACAK.
 
@@ -481,18 +510,12 @@ def _render_liveportrait_idle(image: Path, out_dir: Path, seconds: float, fps: i
       2) (opsional) Render 1 unit SENYUM tipis dari 'idle_smile' bila tersedia.
       3) Susun timeline non-periodik: basis wajah netral + sisipkan unit pada
          waktu acak (lihat _build_random_idle).
-    Sumber driving diambil dari folder yang sama dengan IDLE_DRIVING
-    (idle_blink.mp4 / idle_smile.mp4), sehingga tidak perlu env var baru.
     """
-    if not IDLE_DRIVING or not Path(IDLE_DRIVING).exists():
-        raise RuntimeError('no IDLE_DRIVING clip configured')
+    blink_src, smile_src = _find_idle_driving_sources()
+    if not blink_src or not blink_src.exists():
+        raise RuntimeError('no IDLE_DRIVING clip configured or found')
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    assets_dir = Path(IDLE_DRIVING).parent
-    blink_src = assets_dir / 'idle_blink.mp4'
-    smile_src = assets_dir / 'idle_smile.mp4'
-    if not blink_src.exists():
-        blink_src = Path(IDLE_DRIVING)
+    _log('LivePortrait idle driving source:', blink_src, '(smile:', smile_src, ')')
 
     units = {}
     # Unit kedip: mulut DIKUNCI tertutup (normalize lip), amplitudo penuh (0.9).
@@ -501,7 +524,7 @@ def _render_liveportrait_idle(image: Path, out_dir: Path, seconds: float, fps: i
     except Exception as e:
         _log('blink unit gagal:', e)
     # Unit senyum: biarkan senyum tipis (JANGAN normalize lip); hanya bila ada sumbernya.
-    if smile_src.exists():
+    if smile_src and smile_src.exists():
         try:
             units['smile'] = _lp_render_unit(image, smile_src, out_dir / 'u_smile', False, 0.4)
         except Exception as e:
@@ -610,6 +633,8 @@ def remove_background_video(in_path, out_dir, fps) -> Path:
             'ffmpeg', '-y', '-framerate', str(fps),
             '-i', str(frames_dir / 'f_%06d.png'),
             '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p',
+            '-metadata:s:v:0', 'alpha_mode=1',
+            '-auto-alt-ref', '0',
             '-b:v', '0', '-crf', '24', '-an',
             str(out_webm),
         ], timeout=1200)
