@@ -3055,7 +3055,7 @@ export class Processor {
       '-map', '[aout]',
       '-t', String(hookDurationMs / 1000),
       '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
-      '-pix_fmt', 'yuv420p', '-s', '1080x1920',
+      '-pix_fmt', 'yuv420p', '-s', '1080x1920', '-r', '30',
       '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
       segAPath
     );
@@ -3485,9 +3485,9 @@ export class Processor {
           '-i', customThumb,
           '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
           '-t', '0.4',
-          '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p',
+          '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1,format=yuv420p',
           '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
-          '-pix_fmt', 'yuv420p',
+          '-pix_fmt', 'yuv420p', '-r', '30',
           '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
           seg0Path,
         ]);
@@ -3575,7 +3575,7 @@ export class Processor {
         '-t', String(takeawayDurMs / 1000),
         '-shortest',
         '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
-        '-pix_fmt', 'yuv420p', '-s', '1080x1920',
+        '-pix_fmt', 'yuv420p', '-s', '1080x1920', '-r', '30',
         '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
         segCPath
       );
@@ -3640,9 +3640,9 @@ export class Processor {
 
         const filterParts: string[] = [];
         if (transitionEffect !== 'none') {
-          filterParts.push(`[0:v]format=yuv420p[v0]`);
-          filterParts.push(`[1:v]format=yuv420p[v1]`);
-          filterParts.push(`[2:v]format=yuv420p[v2]`);
+          filterParts.push(`[0:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[v0]`);
+          filterParts.push(`[1:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[v1]`);
+          filterParts.push(`[2:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[v2]`);
           filterParts.push(`[v0][v1]xfade=transition=${transitionEffect}:duration=${tDur}:offset=${offset1}[v01]`);
           filterParts.push(`[v01][v2]xfade=transition=${transitionEffect}:duration=${tDur}:offset=${offset2},format=yuv420p[vout]`);
 
@@ -3661,7 +3661,7 @@ export class Processor {
             filterParts.push(`[aout_raw]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`);
           }
         } else {
-          filterParts.push('[0:v]format=yuv420p[v0];[1:v]format=yuv420p[v1];[2:v]format=yuv420p[v2];[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0];[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1];[2:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a2];[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vout][aout]');
+          filterParts.push('[0:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[v0];[1:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[v1];[2:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[v2];[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0];[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1];[2:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a2];[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vout][aout]');
         }
 
         inputArgs.push(
@@ -3691,8 +3691,8 @@ export class Processor {
 
         const filterParts: string[] = [];
         if (transitionEffect !== 'none') {
-          filterParts.push(`[0:v]format=yuv420p[v0]`);
-          filterParts.push(`[1:v]format=yuv420p[v1]`);
+          filterParts.push(`[0:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[v0]`);
+          filterParts.push(`[1:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[v1]`);
           filterParts.push(`[v0][v1]xfade=transition=${transitionEffect}:duration=${tDur2}:offset=${offset1},format=yuv420p[vout]`);
 
           filterParts.push(`[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0]`);
@@ -3707,7 +3707,7 @@ export class Processor {
             filterParts.push(`[aout_raw]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`);
           }
         } else {
-          filterParts.push('[0:v]format=yuv420p[v0];[1:v]format=yuv420p[v1];[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0];[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]');
+          filterParts.push('[0:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[v0];[1:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[v1];[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0];[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]');
         }
 
         inputArgs.push(
