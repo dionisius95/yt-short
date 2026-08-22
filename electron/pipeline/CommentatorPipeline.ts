@@ -276,6 +276,7 @@ export class CommentatorPipeline {
         if (!baseUrl) throw new Error('avatar base URL empty (set avatarColabUrl / xttsColabUrl)');
         this._emitProgress(84, 'avatar', 'Generating talking avatar clips...');
         const dir = outputDir || path.dirname(videoPath);
+        const ext = req.avatar.removeBackground ? 'mov' : 'mp4';
         const clips: AvatarClips = {};
 
         if (is3Segment) {
@@ -304,7 +305,7 @@ export class CommentatorPipeline {
               audioPath: segAAudioPath,
               mode: 'talk',
               baseUrl,
-              outputPath: path.join(dir, 'avatar_segA.mp4'),
+              outputPath: path.join(dir, `avatar_segA.${ext}`),
               removeBackground: req.avatar.removeBackground,
             });
             log.info({ path: clips.segmentA }, 'Segment A avatar generated successfully');
@@ -342,7 +343,7 @@ export class CommentatorPipeline {
                 audioPath: segCAudioPath,
                 mode: 'talk',
                 baseUrl,
-                outputPath: path.join(dir, 'avatar_segC.mp4'),
+                outputPath: path.join(dir, `avatar_segC.${ext}`),
                 removeBackground: req.avatar.removeBackground,
               });
               log.info({ path: clips.segmentC }, 'Segment C avatar generated successfully');
@@ -363,7 +364,7 @@ export class CommentatorPipeline {
               audioPath: null,
               mode: 'idle',
               baseUrl,
-              outputPath: path.join(dir, 'avatar_segB_idle.mp4'),
+              outputPath: path.join(dir, `avatar_segB_idle.${ext}`),
               durationSec: Math.min(10, Math.max(1, Math.round(durationMs / 1000))),
               removeBackground: req.avatar.removeBackground,
             });
@@ -398,7 +399,7 @@ export class CommentatorPipeline {
                 audioPath: segJedaAudioPath,
                 mode: 'talk',
                 baseUrl,
-                outputPath: path.join(dir, 'avatar_segB_jeda.mp4'),
+                outputPath: path.join(dir, `avatar_segB_jeda.${ext}`),
                 durationSec: Math.max(1, Math.round((actualReactionDurMs || 2800) / 1000)),
                 removeBackground: req.avatar.removeBackground,
               });
@@ -420,7 +421,7 @@ export class CommentatorPipeline {
               audioPath: ttsTrackPath,
               mode: 'talk',
               baseUrl,
-              outputPath: path.join(dir, 'avatar_full.mp4'),
+              outputPath: path.join(dir, `avatar_full.${ext}`),
               durationSec: Math.max(1, Math.round(durationMs / 1000)),
               removeBackground: req.avatar.removeBackground,
             });

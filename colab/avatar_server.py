@@ -626,23 +626,22 @@ def remove_background_video(in_path, out_dir, fps) -> Path:
         if idx == 0:
             _log('matting: tak ada frame terbaca -> kembalikan asli')
             return in_path
-        out_webm = out_dir / 'avatar_rgba.webm'
-        # PNG RGBA sequence -> VP9 dengan alpha. yuva420p wajib agar transparansi
-        # ikut ter-encode (mp4/H.264 tidak punya alpha, makanya pakai webm).
+        out_mov = out_dir / 'avatar_rgba.mov'
+        # PNG RGBA sequence -> QuickTime MOV dengan codec PNG (lossless RGBA).
+        # MOV + PNG codec menjamin full alpha channel dibaca 100% transparan
+        # oleh semua versi FFmpeg di Windows/Linux tanpa konversi ke hitam.
         _run([
             'ffmpeg', '-y', '-framerate', str(fps),
             '-i', str(frames_dir / 'f_%06d.png'),
-            '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p',
-            '-metadata:s:v:0', 'alpha_mode=1',
-            '-auto-alt-ref', '0',
-            '-b:v', '0', '-crf', '24', '-an',
-            str(out_webm),
+            '-c:v', 'png', '-pix_fmt', 'rgba',
+            '-an',
+            str(out_mov),
         ], timeout=1200)
-        if not out_webm.exists() or out_webm.stat().st_size < 1000:
-            _log('matting: encode webm gagal -> kembalikan asli')
+        if not out_mov.exists() or out_mov.stat().st_size < 1000:
+            _log('matting: encode mov gagal -> kembalikan asli')
             return in_path
-        _log('matting: background dihapus ->', out_webm)
-        return out_webm
+        _log('matting: background dihapus ->', out_mov)
+        return out_mov
     except Exception as e:
         traceback.print_exc()
         _log('matting gagal (', e, ') -> kembalikan asli')
@@ -674,11 +673,11 @@ def _do_render(image_b64, audio_b64, mode, duration, fps, remove_bg=False) -> Pa
         aud_path.write_bytes(base64.b64decode(audio_b64))
         vid = _render_sadtalker(img_path, aud_path, out_dir, fps)
 
-    # Opsional: hapus background -> webm ber-alpha (orangnya saja). Fail-safe:
+    # Opsional: hapus background -> MOV ber-alpha (orangnya saja). Fail-safe:
     # kalau gagal, remove_background_video mengembalikan `vid` mp4 asli.
     if remove_bg:
         matted = remove_background_video(vid, job / 'matte', fps)
-        if matted and str(matted).lower().endswith('.webm'):
+        if matted and (str(matted).lower().endswith('.mov') or str(matted).lower().endswith('.webm')):
             return Path(matted)
         # matting gagal -> lanjut ke normalisasi mp4 opaque di bawah.
 
