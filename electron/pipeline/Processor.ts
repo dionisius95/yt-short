@@ -2825,9 +2825,9 @@ export class Processor {
     const ratio = Math.max(2, Math.min(20, Math.round((1 / Math.max(0.05, duckingVolume)) * 10) / 10));
     if (hasBgm) {
       const bgmVol = opts.bgMusicVolume ?? 0.20;
-      filterParts.push(`[1:a]volume=1.3,apad,asplit=2[tts_sc][tts_mix];[0:a][tts_sc]sidechaincompress=threshold=0.015:ratio=${ratio}:attack=15:release=350:knee=2.8[bg_ducked];[${bgmIdx}:a]volume=${bgmVol}[bgm_layer];[bg_ducked][bgm_layer][tts_mix]amix=inputs=3:duration=first:dropout_transition=0:weights=1 1 1:normalize=0[aout]`);
+      filterParts.push(`[1:a]volume=1.3,apad,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,asplit=2[tts_sc][tts_mix];[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0_fmt];[a0_fmt][tts_sc]sidechaincompress=threshold=0.015:ratio=${ratio}:attack=15:release=350:knee=2.8[bg_ducked];[${bgmIdx}:a]volume=${bgmVol},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[bgm_layer];[bg_ducked][bgm_layer][tts_mix]amix=inputs=3:duration=first:dropout_transition=0:weights=1 1 1:normalize=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`);
     } else {
-      filterParts.push(`[1:a]volume=1.3,apad,asplit=2[tts_sc][tts_mix];[0:a][tts_sc]sidechaincompress=threshold=0.015:ratio=${ratio}:attack=15:release=350:knee=2.8[bg_ducked];[bg_ducked][tts_mix]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0[aout]`);
+      filterParts.push(`[1:a]volume=1.3,apad,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,asplit=2[tts_sc][tts_mix];[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0_fmt];[a0_fmt][tts_sc]sidechaincompress=threshold=0.015:ratio=${ratio}:attack=15:release=350:knee=2.8[bg_ducked];[bg_ducked][tts_mix]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`);
     }
 
     args.push(
@@ -3044,9 +3044,9 @@ export class Processor {
     if (hasBgm) {
       argsA.push('-i', bgMusicPath!);
       const fadeStartSec = Math.max(0, (hookDurationMs - 250) / 1000);
-      filterComplexA = `[0:v]${subtitlesFilterA}[vout];[0:a]volume='if(lt(t,1.0),1.0,if(lt(t,1.3),1.0-(t-1.0)/0.3*(1.0-0.12),0.12))':eval=frame,aformat=sample_rates=48000:channel_layouts=stereo[orig_a];[1:a]atempo=1.15,adelay=1200|1200,volume=1.4,apad,aformat=sample_rates=48000:channel_layouts=stereo[tts];[2:a]volume=${bgMusicVolume},afade=t=in:st=1.0:d=0.4,afade=t=out:st=${fadeStartSec}:d=0.25,aformat=sample_rates=48000:channel_layouts=stereo[bgm];[orig_a][tts][bgm]amix=inputs=3:duration=first:dropout_transition=0:weights=1 1 1:normalize=0[aout]`;
+      filterComplexA = `[0:v]${subtitlesFilterA}[vout];[0:a]volume='if(lt(t,1.0),1.0,if(lt(t,1.3),1.0-(t-1.0)/0.3*(1.0-0.12),0.12))':eval=frame,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[orig_a];[1:a]atempo=1.15,aresample=48000,aformat=channel_layouts=stereo,adelay=1200|1200,volume=1.4,apad,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[tts];[2:a]volume=${bgMusicVolume},afade=t=in:st=1.0:d=0.4,afade=t=out:st=${fadeStartSec}:d=0.25,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[bgm];[orig_a][tts][bgm]amix=inputs=3:duration=first:dropout_transition=0:weights=1 1 1:normalize=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`;
     } else {
-      filterComplexA = `[0:v]${subtitlesFilterA}[vout];[0:a]volume='if(lt(t,1.0),1.0,if(lt(t,1.3),1.0-(t-1.0)/0.3*(1.0-0.12),0.12))':eval=frame,aformat=sample_rates=48000:channel_layouts=stereo[orig_a];[1:a]atempo=1.15,adelay=1200|1200,volume=1.4,apad,aformat=sample_rates=48000:channel_layouts=stereo[tts];[orig_a][tts]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0[aout]`;
+      filterComplexA = `[0:v]${subtitlesFilterA}[vout];[0:a]volume='if(lt(t,1.0),1.0,if(lt(t,1.3),1.0-(t-1.0)/0.3*(1.0-0.12),0.12))':eval=frame,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[orig_a];[1:a]atempo=1.15,aresample=48000,aformat=channel_layouts=stereo,adelay=1200|1200,volume=1.4,apad,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[tts];[orig_a][tts]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`;
     }
 
     argsA.push(
@@ -3348,9 +3348,9 @@ export class Processor {
         argsJeda.push('-i', bgMusicPath!);
         const bgmVol = opts.bgMusicVolume ?? 0.20;
         const fadeOutSec = Math.max(0, freezeDurSec - 0.25);
-        jedaFilter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1242:2208,crop=1080:1920,setsar=1,fps=30,${subsFilterJeda},format=yuv420p[vout];[1:a]atempo=1.15,volume=1.4,apad,aformat=sample_rates=48000:channel_layouts=stereo[tts];[2:a]volume=${bgmVol},afade=t=in:st=0:d=0.2,afade=t=out:st=${fadeOutSec}:d=0.25,aformat=sample_rates=48000:channel_layouts=stereo[bgm];[tts][bgm]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0[aout]`;
+        jedaFilter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1242:2208,crop=1080:1920,setsar=1,fps=30,${subsFilterJeda},format=yuv420p[vout];[1:a]atempo=1.15,volume=1.4,apad,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[tts];[2:a]volume=${bgmVol},afade=t=in:st=0:d=0.2,afade=t=out:st=${fadeOutSec}:d=0.25,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[bgm];[tts][bgm]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`;
       } else {
-        jedaFilter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1242:2208,crop=1080:1920,setsar=1,fps=30,${subsFilterJeda},format=yuv420p[vout];[1:a]atempo=1.15,volume=1.4,apad,aformat=sample_rates=48000:channel_layouts=stereo[aout]`;
+        jedaFilter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1242:2208,crop=1080:1920,setsar=1,fps=30,${subsFilterJeda},format=yuv420p[vout];[1:a]atempo=1.15,volume=1.4,apad,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[aout]`;
       }
 
       argsJeda.push(
@@ -3418,9 +3418,9 @@ export class Processor {
         '-i', segB1Path,
         '-i', segBJedaPath,
         '-i', segB2Path,
-        '-filter_complex', '[0:v]fps=30,setsar=1,format=yuv420p[v0];[0:a]aformat=sample_rates=48000:channel_layouts=stereo[a0];[1:v]fps=30,setsar=1,format=yuv420p[v1];[1:a]aformat=sample_rates=48000:channel_layouts=stereo[a1];[2:v]fps=30,setsar=1,format=yuv420p[v2];[2:a]aformat=sample_rates=48000:channel_layouts=stereo[a2];[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vcat][acat]',
+        '-filter_complex', '[0:v]fps=30,setsar=1,format=yuv420p[v0];[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0];[1:v]fps=30,setsar=1,format=yuv420p[v1];[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1];[2:v]fps=30,setsar=1,format=yuv420p[v2];[2:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a2];[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vcat][acat];[acat]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]',
         '-map', '[vcat]',
-        '-map', '[acat]',
+        '-map', '[aout]',
         '-c:v', 'libx264', '-crf', '17', '-preset', 'slow',
         '-pix_fmt', 'yuv420p', '-r', '30',
         '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
@@ -3560,12 +3560,12 @@ export class Processor {
         ? `subtitles='${escapedAssC}':fontsdir='${escapedFontsDir}'`
         : `subtitles='${escapedAssC}'`;
 
-      let filterComplexC = `[0:v]${subtitlesFilterC}[vout];[1:a]atempo=1.15,volume=1.35,apad,aformat=sample_rates=48000:channel_layouts=stereo[aout]`;
+      let filterComplexC = `[0:v]${subtitlesFilterC}[vout];[1:a]atempo=1.15,volume=1.35,apad,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[aout]`;
       const argsC: string[] = ['-y', '-i', outroInputPath, '-i', takeawayTts!];
 
       if (hasBgm) {
         argsC.push('-i', bgMusicPath!);
-        filterComplexC = `[0:v]${subtitlesFilterC}[vout];[1:a]atempo=1.15,volume=1.35,apad,aformat=sample_rates=48000:channel_layouts=stereo[tts];[2:a]volume=${bgMusicVolume},afade=t=in:st=0:d=0.25,aformat=sample_rates=48000:channel_layouts=stereo[bgm];[tts][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`;
+        filterComplexC = `[0:v]${subtitlesFilterC}[vout];[1:a]atempo=1.15,volume=1.35,apad,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[tts];[2:a]volume=${bgMusicVolume},afade=t=in:st=0:d=0.25,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[bgm];[tts][bgm]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`;
       }
 
       argsC.push(
@@ -3653,15 +3653,15 @@ export class Processor {
           filterParts.push(`[a01][a2]acrossfade=d=${tDur}:c1=tri:c2=tri[aout_raw]`);
 
           if (hasSfx && sfxIdx >= 0) {
-            filterParts.push(`[${sfxIdx}:a]asplit=2[sfxA][sfxB]`);
+            filterParts.push(`[${sfxIdx}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,asplit=2[sfxA][sfxB]`);
             filterParts.push(`[sfxA]adelay=${offset1Ms}|${offset1Ms},volume=0.85[sfx1]`);
             filterParts.push(`[sfxB]adelay=${offset2Ms}|${offset2Ms},volume=0.85[sfx2]`);
-            filterParts.push(`[aout_raw][sfx1][sfx2]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[aout]`);
+            filterParts.push(`[aout_raw][sfx1][sfx2]amix=inputs=3:duration=first:dropout_transition=0:normalize=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`);
           } else {
-            filterParts.push(`[aout_raw]anull[aout]`);
+            filterParts.push(`[aout_raw]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`);
           }
         } else {
-          filterParts.push('[0:v][0:a][1:v][1:a][2:v][2:a]concat=n=3:v=1:a=1[vout][aout]');
+          filterParts.push('[0:v]format=yuv420p[v0];[1:v]format=yuv420p[v1];[2:v]format=yuv420p[v2];[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0];[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1];[2:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a2];[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vout][aout]');
         }
 
         inputArgs.push(
@@ -3670,7 +3670,7 @@ export class Processor {
           '-map', '[aout]',
           '-c:v', 'libx264', '-crf', '17', '-preset', 'medium',
           '-pix_fmt', 'yuv420p',
-          '-c:a', 'aac', '-b:a', '320k',
+          '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
           outputPath
         );
         const totalJoinDur = durA_sec + durB_sec + durC_sec - 2 * tDur;
@@ -3700,13 +3700,14 @@ export class Processor {
           filterParts.push(`[a0][a1]acrossfade=d=${tDur2}:c1=tri:c2=tri[aout_raw]`);
 
           if (hasSfx && sfxIdx >= 0) {
-            filterParts.push(`[${sfxIdx}:a]adelay=${offset1Ms}|${offset1Ms},volume=0.85[sfx1]`);
-            filterParts.push(`[aout_raw][sfx1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`);
+            filterParts.push(`[${sfxIdx}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[sfx_fmt]`);
+            filterParts.push(`[sfx_fmt]adelay=${offset1Ms}|${offset1Ms},volume=0.85[sfx1]`);
+            filterParts.push(`[aout_raw][sfx1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`);
           } else {
-            filterParts.push(`[aout_raw]anull[aout]`);
+            filterParts.push(`[aout_raw]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`);
           }
         } else {
-          filterParts.push('[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[vout][aout]');
+          filterParts.push('[0:v]format=yuv420p[v0];[1:v]format=yuv420p[v1];[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0];[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]');
         }
 
         inputArgs.push(
@@ -3715,7 +3716,7 @@ export class Processor {
           '-map', '[aout]',
           '-c:v', 'libx264', '-crf', '17', '-preset', 'medium',
           '-pix_fmt', 'yuv420p',
-          '-c:a', 'aac', '-b:a', '320k',
+          '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', '-ac', '2',
           outputPath
         );
         const totalJoinDur2 = durA_sec + durB_sec - tDur2;
