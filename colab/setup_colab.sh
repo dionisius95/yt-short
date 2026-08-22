@@ -16,14 +16,14 @@ apt-get -qq install -y ffmpeg git-lfs >/dev/null 2>&1 || true
 echo "==> Python deps (tanpa pin yang bisa merusak numpy/torch VoxCPM)"
 # 1) Deps standar dengan pre-built wheels
 pip -q install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors \
-    face-alignment kornia pydub librosa numba resampy scikit-image >/dev/null 2>&1 || \
-  pip install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors face-alignment kornia pydub librosa numba resampy scikit-image
+    face-alignment facexlib kornia pydub librosa numba resampy scikit-image scipy tqdm pyyaml >/dev/null 2>&1 || \
+  pip install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors face-alignment facexlib kornia pydub librosa numba resampy scikit-image scipy tqdm pyyaml
 
-# 2) basicsr & gfpgan (WAJIB --no-build-isolation karena setup.py mengakses torch dari environment)
-echo "==> Install basicsr & gfpgan (--no-build-isolation)"
-pip -q install --no-build-isolation basicsr gfpgan >/dev/null 2>&1 || \
-  pip -q install --no-build-isolation --no-deps basicsr gfpgan >/dev/null 2>&1 || \
-  pip -q install --no-deps basicsr gfpgan >/dev/null 2>&1 || true
+# 2) basicsr, gfpgan, facexlib (--no-build-isolation fallback jika perlu)
+echo "==> Install basicsr, gfpgan & facexlib (--no-build-isolation)"
+pip -q install --no-build-isolation basicsr gfpgan facexlib >/dev/null 2>&1 || \
+  pip -q install --no-build-isolation --no-deps basicsr gfpgan facexlib >/dev/null 2>&1 || \
+  pip -q install --no-deps basicsr gfpgan facexlib >/dev/null 2>&1 || true
 
 echo "==> Hapus-background deps (rembg + onnxruntime GPU, fallback CPU)"
 # rembg + onnxruntime (u2net_human_seg) untuk toggle "Hapus Background".
