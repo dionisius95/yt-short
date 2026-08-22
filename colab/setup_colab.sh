@@ -186,24 +186,56 @@ for kw in float int bool object str complex; do
     | xargs -0 -r sed -i -E "s/\bnp\.${kw}\b/${kw}/g" 2>/dev/null || true
 done
 
-# Patch align_img: numpy>=1.24 tolak array ragged (w0,h0,s skalar + t[0],t[1] array).
-echo "==> Patch SadTalker align_img (numpy ragged-array fix)"
+# Patch preprocess.py: numpy>=1.24 tolak array ragged & float(1D array) TypeError
+echo "==> Patch SadTalker preprocess.py (numpy 2.x scalar & ragged-array fix)"
 python3 - <<'PYEOF'
-import io
+import io, re
 p = "/content/SadTalker/src/face3d/util/preprocess.py"
 try:
     src = io.open(p, encoding="utf-8").read()
 except FileNotFoundError:
     print("[patch] WARN: preprocess.py tidak ditemukan"); raise SystemExit(0)
-old = "trans_params = np.array([w0, h0, s, t[0], t[1]])"
-new = "trans_params = np.array([float(w0), float(h0), float(np.asarray(s).reshape(-1)[0]), float(np.asarray(t).reshape(-1)[0]), float(np.asarray(t).reshape(-1)[1])])"
-if new in src:
-    print("[patch] align_img: sudah dipatch")
-elif old in src:
-    io.open(p, "w", encoding="utf-8").write(src.replace(old, new))
-    print("[patch] align_img: FIXED")
+
+# 1) Patch align_img trans_params
+old_trans = "trans_params = np.array([w0, h0, s, t[0], t[1]])"
+new_trans = "trans_params = np.array([float(w0), float(h0), float(np.asarray(s).reshape(-1)[0]), float(np.asarray(t).reshape(-1)[0]), float(np.asarray(t).reshape(-1)[1])])"
+if old_trans in src:
+    src = src.replace(old_trans, new_trans)
+
+# 2) Patch resize_n_crop_img (hindari TypeError: only 0-dimensional arrays can be converted to Python scalars)
+# Ganti fungsi resize_n_crop_img dengan versi aman skalar
+pattern = r"def resize_n_crop_img\(img, lm, t, s, target_size=224\., mask=None\):[\s\S]*?return img, lm, mask"
+replacement = """def resize_n_crop_img(img, lm, t, s, target_size=224., mask=None):
+    w0, h0 = img.size
+    s_val = float(np.asarray(s).reshape(-1)[0])
+    t_val = np.asarray(t).reshape(-1)
+    w = int(round(float(w0) * s_val))
+    h = int(round(float(h0) * s_val))
+    left = int(round(float(w)/2.0 - float(target_size)/2.0 + float(t_val[0] - w0/2.0) * s_val))
+    right = int(round(left + target_size))
+    up = int(round(float(h)/2.0 - float(target_size)/2.0 + float(t_val[1] - h0/2.0) * s_val))
+    below = int(round(up + target_size))
+
+    img = img.resize((w, h), resample=Image.BICUBIC)
+    img = img.crop((left, up, right, below))
+
+    if mask is not None:
+        mask = mask.resize((w, h), resample=Image.BICUBIC)
+        mask = mask.crop((left, up, right, below))
+
+    lm = np.stack([lm[:, 0] - t_val[0] + w0/2.0, lm[:, 1] -
+                  t_val[1] + h0/2.0], axis=1)*(float(w)/float(w0))
+    lm = lm - np.reshape(
+        np.array([(float(w)/2.0 - float(target_size)/2.0), (float(h)/2.0 - float(target_size)/2.0)]), [1, 2])
+    return img, lm, mask"""
+
+if re.search(pattern, src):
+    src = re.sub(pattern, replacement, src)
+    print("[patch] resize_n_crop_img & align_img: FIXED (scalar-safe)")
 else:
-    print("[patch] align_img: pola tidak ditemukan (mungkin versi beda)")
+    print("[patch] resize_n_crop_img pattern not found (already patched or different)")
+
+io.open(p, "w", encoding="utf-8").write(src)
 PYEOF
 
 # --------- LivePortrait (mode idle: B) ---------

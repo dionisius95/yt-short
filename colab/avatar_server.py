@@ -75,6 +75,49 @@ PORT = int(os.environ.get('AVATAR_PORT', '5000'))
 
 WORKDIR.mkdir(parents=True, exist_ok=True)
 
+
+def _patch_sadtalker_preprocess():
+    """Auto-patch SadTalker preprocess.py to prevent numpy 2.x 0-dim scalar TypeError."""
+    try:
+        p = SADTALKER_DIR / 'src' / 'face3d' / 'util' / 'preprocess.py'
+        if not p.exists():
+            return
+        src = p.read_text(encoding='utf-8')
+        import re
+        pattern = r"def resize_n_crop_img\(img, lm, t, s, target_size=224\., mask=None\):[\s\S]*?return img, lm, mask"
+        replacement = """def resize_n_crop_img(img, lm, t, s, target_size=224., mask=None):
+    w0, h0 = img.size
+    s_val = float(np.asarray(s).reshape(-1)[0])
+    t_val = np.asarray(t).reshape(-1)
+    w = int(round(float(w0) * s_val))
+    h = int(round(float(h0) * s_val))
+    left = int(round(float(w)/2.0 - float(target_size)/2.0 + float(t_val[0] - w0/2.0) * s_val))
+    right = int(round(left + target_size))
+    up = int(round(float(h)/2.0 - float(target_size)/2.0 + float(t_val[1] - h0/2.0) * s_val))
+    below = int(round(up + target_size))
+
+    img = img.resize((w, h), resample=Image.BICUBIC)
+    img = img.crop((left, up, right, below))
+
+    if mask is not None:
+        mask = mask.resize((w, h), resample=Image.BICUBIC)
+        mask = mask.crop((left, up, right, below))
+
+    lm = np.stack([lm[:, 0] - t_val[0] + w0/2.0, lm[:, 1] -
+                  t_val[1] + h0/2.0], axis=1)*(float(w)/float(w0))
+    lm = lm - np.reshape(
+        np.array([(float(w)/2.0 - float(target_size)/2.0), (float(h)/2.0 - float(target_size)/2.0)]), [1, 2])
+    return img, lm, mask"""
+        if re.search(pattern, src):
+            src = re.sub(pattern, replacement, src)
+            p.write_text(src, encoding='utf-8')
+            print('[avatar] auto-patched SadTalker preprocess.py (scalar-safe)', flush=True)
+    except Exception as e:
+        print('[avatar] preprocess patch warn:', e, flush=True)
+
+
+_patch_sadtalker_preprocess()
+
 # --- Async job registry -------------------------------------------------------
 # Cloudflare quick tunnels drop any single request that runs past ~100s (HTTP
 # 524). Avatar renders can take several minutes, so /avatar enqueues a job and
