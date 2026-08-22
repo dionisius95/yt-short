@@ -207,13 +207,37 @@ else:
 PYEOF
 
 # --------- LivePortrait (mode idle: B) ---------
-if [ ! -d "$WORK/LivePortrait" ]; then
-  echo "==> Clone LivePortrait"
-  git clone -q https://github.com/KwaiVGI/LivePortrait "$WORK/LivePortrait"
-  pip -q install -r "$WORK/LivePortrait/requirements.txt" >/dev/null 2>&1 || true
-  pip -q install "huggingface_hub[cli]" >/dev/null 2>&1 || true
-  huggingface-cli download KwaiVGI/LivePortrait --local-dir "$WORK/LivePortrait/pretrained_weights" --exclude "*.git*" >/dev/null 2>&1 || true
+echo "==> Setup LivePortrait (mode idle: B)"
+if [ ! -f "$WORK/LivePortrait/inference.py" ]; then
+  echo "==> [1/3] Clone LivePortrait repo ..."
+  rm -rf "$WORK/LivePortrait"
+  git clone --depth 1 https://github.com/KwaiVGI/LivePortrait "$WORK/LivePortrait"
 fi
+
+echo "==> [2/3] Install LivePortrait dependencies ..."
+pip -q install huggingface_hub tyro pyyaml scipy imageio imageio-ffmpeg >/dev/null 2>&1 || true
+
+echo "==> [3/3] Download pretrained weights LivePortrait (~2.5GB) ..."
+python3 - <<'LPEOF'
+import os, sys
+try:
+    from huggingface_hub import snapshot_download
+    dst = "/content/LivePortrait/pretrained_weights"
+    os.makedirs(dst, exist_ok=True)
+    # Cek apakah file model utama sudah lengkap (hindari download ulang)
+    main_files = ["appearance_feature_extractor.pth", "motion_extractor.pth", "spade_generator.pth", "warping_module.pth"]
+    exists_count = sum(1 for f in main_files if os.path.exists(os.path.join(dst, f)) or os.path.exists(os.path.join(dst, "liveportrait", f)))
+    if exists_count >= len(main_files):
+        print("[LivePortrait] Pretrained weights SUDAH ADA (skip download).", flush=True)
+    else:
+        print("[LivePortrait] Mengunduh weights dari HuggingFace (KwaiVGI/LivePortrait) ...", flush=True)
+        snapshot_download(repo_id="KwaiVGI/LivePortrait", local_dir=dst, ignore_patterns=["*.git*", "*.md", "*.png", "*.jpg"])
+        print("[LivePortrait] Download weights SELESAI!", flush=True)
+except Exception as e:
+    print("[LivePortrait] Download via snapshot_download error:", e, flush=True)
+    print("[LivePortrait] Coba fallback huggingface-cli ...", flush=True)
+    os.system("huggingface-cli download KwaiVGI/LivePortrait --local-dir /content/LivePortrait/pretrained_weights --exclude '*.git*' || true")
+LPEOF
 
 # --------- Klip driving idle untuk Segment B (KEDIP + SENYUM tipis, terklasifikasi) ---------
 # PENTING: dulu klip driving diambil asal (contoh pertama / terpendek) -> sering
