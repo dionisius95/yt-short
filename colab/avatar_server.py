@@ -112,8 +112,38 @@ def _patch_sadtalker_preprocess():
             src = re.sub(pattern, replacement, src)
             p.write_text(src, encoding='utf-8')
             print('[avatar] auto-patched SadTalker preprocess.py (scalar-safe)', flush=True)
+
+        p_enh = SADTALKER_DIR / 'src' / 'utils' / 'face_enhancer.py'
+        if p_enh.exists():
+            src_enh = p_enh.read_text(encoding='utf-8')
+            if 'from gfpgan import GFPGANer' in src_enh and 'try:' not in src_enh:
+                src_enh = src_enh.replace('from gfpgan import GFPGANer', """try:
+    from gfpgan import GFPGANer
+except Exception:
+    try:
+        from gfpgan.utils import GFPGANer
+    except Exception:
+        GFPGANer = None""")
+                p_enh.write_text(src_enh, encoding='utf-8')
+                print('[avatar] auto-patched SadTalker face_enhancer.py (safe GFPGANer import)', flush=True)
     except Exception as e:
         print('[avatar] preprocess patch warn:', e, flush=True)
+
+    # Patch basicsr functional_tensor
+    try:
+        import glob
+        for root in sys.path:
+            if 'site-packages' in root or 'dist-packages' in root:
+                for f in glob.glob(f"{root}/basicsr/**/*.py", recursive=True):
+                    try:
+                        txt = Path(f).read_text(encoding='utf-8')
+                        if 'torchvision.transforms.functional_tensor' in txt:
+                            txt = txt.replace('torchvision.transforms.functional_tensor', 'torchvision.transforms.functional')
+                            Path(f).write_text(txt, encoding='utf-8')
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
 
 _patch_sadtalker_preprocess()

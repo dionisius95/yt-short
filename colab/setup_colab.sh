@@ -16,14 +16,29 @@ apt-get -qq install -y ffmpeg git-lfs >/dev/null 2>&1 || true
 echo "==> Python deps (tanpa pin yang bisa merusak numpy/torch VoxCPM)"
 # 1) Deps standar dengan pre-built wheels
 pip -q install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors \
-    face-alignment facexlib kornia pydub librosa numba resampy scikit-image scipy tqdm pyyaml >/dev/null 2>&1 || \
-  pip install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors face-alignment facexlib kornia pydub librosa numba resampy scikit-image scipy tqdm pyyaml
+    face-alignment facexlib kornia pydub librosa numba resampy scikit-image scipy tqdm pyyaml yapf tb-nightly >/dev/null 2>&1 || \
+  pip install flask flask-cloudflared imageio imageio-ffmpeg yacs safetensors face-alignment facexlib kornia pydub librosa numba resampy scikit-image scipy tqdm pyyaml yapf tb-nightly
 
-# 2) basicsr, gfpgan, facexlib (--no-build-isolation fallback jika perlu)
-echo "==> Install basicsr, gfpgan & facexlib (--no-build-isolation)"
+# 2) basicsr & gfpgan (install dengan --no-build-isolation)
+echo "==> Install basicsr & gfpgan (--no-build-isolation)"
 pip -q install --no-build-isolation basicsr gfpgan facexlib >/dev/null 2>&1 || \
   pip -q install --no-build-isolation --no-deps basicsr gfpgan facexlib >/dev/null 2>&1 || \
   pip -q install --no-deps basicsr gfpgan facexlib >/dev/null 2>&1 || true
+
+# 3) Patch basicsr di site-packages (perbaiki import functional_tensor yang dihapus di torchvision baru)
+python3 - <<'BSREOF'
+import glob, sys
+for root in sys.path:
+    if "site-packages" in root or "dist-packages" in root:
+        for f in glob.glob(f"{root}/basicsr/**/*.py", recursive=True):
+            try:
+                txt = open(f, "r", encoding="utf-8").read()
+                if "torchvision.transforms.functional_tensor" in txt:
+                    txt = txt.replace("torchvision.transforms.functional_tensor", "torchvision.transforms.functional")
+                    open(f, "w", encoding="utf-8").write(txt)
+            except Exception:
+                pass
+BSREOF
 
 echo "==> Hapus-background deps (rembg + onnxruntime GPU, fallback CPU)"
 # rembg + onnxruntime (u2net_human_seg) untuk toggle "Hapus Background".
@@ -236,6 +251,25 @@ else:
     print("[patch] resize_n_crop_img pattern not found (already patched or different)")
 
 io.open(p, "w", encoding="utf-8").write(src)
+
+# 3) Patch face_enhancer.py: ImportError GFPGANer fallback
+p_enh = "/content/SadTalker/src/utils/face_enhancer.py"
+try:
+    src_enh = io.open(p_enh, encoding="utf-8").read()
+    if "from gfpgan import GFPGANer" in src_enh and "try:" not in src_enh:
+        src_enh = src_enh.replace("from gfpgan import GFPGANer", """try:
+    from gfpgan import GFPGANer
+except Exception:
+    try:
+        from gfpgan.utils import GFPGANer
+    except Exception:
+        GFPGANer = None""")
+        io.open(p_enh, "w", encoding="utf-8").write(src_enh)
+        print("[patch] face_enhancer.py GFPGANer import: FIXED (safe fallback)")
+    else:
+        print("[patch] face_enhancer.py: sudah aman / sudah dipatch")
+except Exception as e_enh:
+    print("[patch] face_enhancer.py warn:", e_enh)
 PYEOF
 
 # --------- LivePortrait (mode idle: B) ---------
