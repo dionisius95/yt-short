@@ -1020,6 +1020,7 @@ function buildLetterboxFilter(
 function buildTitleEvents(
   title: TitleOverlay,
   durationMs: number,
+  startMs: number = 0,
 ): { styleLine: string; dialogueLine: string } | null {
   if (!title.text.trim()) return null;
 
@@ -1045,7 +1046,7 @@ function buildTitleEvents(
     `Style: Title,${fontName},${title.fontSize},${primaryAss},&H000000FF,${outlineAss},${backAss},${bold},0,0,0,100,100,1,0,1,${title.outlineSize},0,2,60,60,0,1`;
 
   const posTag     = `{\\an2\\pos(540,${title.y})}`;
-  const dialogueLine = `Dialogue: 1,${fmt(0)},${fmt(durationMs)},Title,,0,0,0,,${posTag}${text}`;
+  const dialogueLine = `Dialogue: 1,${fmt(startMs)},${fmt(durationMs)},Title,,0,0,0,,${posTag}${text}`;
 
   return { styleLine, dialogueLine };
 }
@@ -2736,6 +2737,43 @@ export class Processor {
     // Use ttsAudioPath (not inputVideoPath) for loudness detection — shake effect
     // must analyse the TTS voice audio since `words` timestamps are TTS-relative.
     const assContent = await buildAssSubtitles(words, 0, durationMs, resolvedCaption, ttsAudioPath);
+
+    let finalAss = assContent;
+    const bannerDurationSec = Math.min(3.5, durationMs / 1000);
+    const bannerDurMs = Math.round(bannerDurationSec * 1000);
+
+    // 1. Auto Top Hook Banner for Full Commentary (0 - 3.5s only, font size 80px Extra Bold)
+    let hookHeadlineText = (opts.hookHeadline || '').trim();
+    if (!hookHeadlineText && words && words.length > 0) {
+      hookHeadlineText = words.slice(0, 10).map(w => w.word).join(' ').trim();
+    }
+
+    if (hookHeadlineText) {
+      const durFormat = (sec: number) => {
+        const m = Math.floor(sec / 60);
+        const s = (sec % 60).toFixed(2);
+        return `0:${m.toString().padStart(2, '0')}:${s.padStart(5, '0')}`;
+      };
+      const endFormatted = durFormat(bannerDurationSec);
+
+      const wordsArr = hookHeadlineText.split(/\s+/).filter(Boolean);
+      let displayHook = '';
+      if (wordsArr.length > 5) {
+        const mid = Math.ceil(wordsArr.length / 2);
+        displayHook = wordsArr.slice(0, mid).join(' ') + '\\N' + wordsArr.slice(mid).join(' ');
+      } else {
+        displayHook = wordsArr.join(' ');
+      }
+
+      // Premium High-Converting Banner: Bold Montserrat 80px, vibrant yellow text with solid dark badge box at Y: 130px
+      const bannerStyleLine = `Style: HookBanner,Montserrat,80,&H0000FFFF,&H000000FF,&H00000000,&H00111111,-1,0,0,0,100,100,1,0,3,18,0,8,40,40,130,1`;
+      const bannerDialogueLine = `Dialogue: 1,0:00:00.00,${endFormatted},HookBanner,,0,0,0,,{\\fad(120,200)}⚠️ ${displayHook.toUpperCase()}`;
+
+      finalAss = finalAss.replace(/\r?\n\r?\n\[Events\]/, `\n${bannerStyleLine}\n\n[Events]`);
+      finalAss += bannerDialogueLine + '\n';
+    }
+
+    // 2. User's Channel Title Overlay (Appears after Hook Banner, starting from 3.5s onwards!)
     let titleOverlay = (opts as any).titleOverlay;
     if (!titleOverlay && optionsJson) {
       try {
@@ -2744,9 +2782,9 @@ export class Processor {
       } catch {}
     }
 
-    let finalAss = assContent;
     if (titleOverlay) {
-      const titleResult = buildTitleEvents(titleOverlay, durationMs);
+      const startAfterHookMs = hookHeadlineText ? bannerDurMs : 0;
+      const titleResult = buildTitleEvents(titleOverlay, durationMs, startAfterHookMs);
       if (titleResult) {
         finalAss = finalAss.replace(/\r?\n\r?\n\[Events\]/, `\n${titleResult.styleLine}\n\n[Events]`);
         finalAss += titleResult.dialogueLine + '\n';
@@ -3001,8 +3039,8 @@ export class Processor {
         displayHook = wordsArr.join(' ');
       }
 
-      // Premium High-Converting Banner: Bold Montserrat 52px, vibrant yellow text with solid dark badge box at Y: 140px
-      const bannerStyleLine = `Style: HookBanner,Montserrat,52,&H0000FFFF,&H000000FF,&H00000000,&H00111111,-1,0,0,0,100,100,1,0,3,14,0,8,48,48,140,1`;
+      // Premium High-Converting Banner: Bold Montserrat 80px, vibrant yellow text with solid dark badge box at Y: 130px
+      const bannerStyleLine = `Style: HookBanner,Montserrat,80,&H0000FFFF,&H000000FF,&H00000000,&H00111111,-1,0,0,0,100,100,1,0,3,18,0,8,40,40,130,1`;
       const bannerDialogueLine = `Dialogue: 1,0:00:00.00,${endFormatted},HookBanner,,0,0,0,,{\\fad(120,200)}⚠️ ${displayHook.toUpperCase()}`;
 
       finalAss = finalAss.replace(/\r?\n\r?\n\[Events\]/, `\n${bannerStyleLine}\n\n[Events]`);

@@ -414,11 +414,28 @@ export class CommentatorPipeline {
           }
         } else {
           // Full Commentary Mode -> single continuous talking avatar across the video
+          let fullAudioPath = ttsTrackPath;
+          try {
+            const transformedAudioFull = path.join(dir, `avatar_audio_full_${Date.now()}.wav`);
+            await runFfmpeg([
+              '-y',
+              '-i', ttsTrackPath,
+              '-af', 'aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono',
+              '-c:a', 'pcm_s16le', '-ar', '16000', '-ac', '1',
+              transformedAudioFull,
+            ]);
+            if (fs.existsSync(transformedAudioFull) && fs.statSync(transformedAudioFull).size > 1000) {
+              fullAudioPath = transformedAudioFull;
+            }
+          } catch (errTransFull) {
+            log.warn({ errTransFull }, 'Failed to transform Full commentary avatar driving audio; using raw TTS');
+          }
+
           try {
             this._emitProgress(84, 'avatar', 'Generating Full commentary avatar clip...');
             clips.segmentA = await this.avatarGen.generate({
               imagePath: req.avatar.imagePath,
-              audioPath: ttsTrackPath,
+              audioPath: fullAudioPath,
               mode: 'talk',
               baseUrl,
               outputPath: path.join(dir, `avatar_full.${ext}`),
@@ -428,6 +445,10 @@ export class CommentatorPipeline {
             log.info({ path: clips.segmentA }, 'Full commentary avatar generated successfully');
           } catch (errFull) {
             log.warn({ errFull }, 'Failed to generate Full commentary avatar clip');
+          } finally {
+            if (fullAudioPath !== ttsTrackPath) {
+              try { fs.unlinkSync(fullAudioPath); } catch {}
+            }
           }
         }
 

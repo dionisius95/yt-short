@@ -332,7 +332,7 @@ def _render_sadtalker(image: Path, audio: Path, out_dir: Path, fps: int) -> Path
             '--size', str(size),
         ]
         try:
-            _run(cmd, cwd=SADTALKER_DIR, timeout=900)
+            _run(cmd, cwd=SADTALKER_DIR, timeout=1500)
             vid = _newest_mp4(out_dir)
             if not vid:
                 raise RuntimeError('SadTalker produced no mp4')
