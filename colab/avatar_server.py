@@ -332,7 +332,7 @@ def _render_sadtalker(image: Path, audio: Path, out_dir: Path, fps: int) -> Path
             '--size', str(size),
         ]
         try:
-            _run(cmd, cwd=SADTALKER_DIR, timeout=1500)
+            _run(cmd, cwd=SADTALKER_DIR, timeout=2400)
             vid = _newest_mp4(out_dir)
             if not vid:
                 raise RuntimeError('SadTalker produced no mp4')
@@ -636,7 +636,7 @@ def remove_background_video(in_path, out_dir, fps) -> Path:
             '-c:v', 'png', '-pix_fmt', 'rgba',
             '-an',
             str(out_mov),
-        ], timeout=1200)
+        ], timeout=2400)
         if not out_mov.exists() or out_mov.stat().st_size < 1000:
             _log('matting: encode mov gagal -> kembalikan asli')
             return in_path

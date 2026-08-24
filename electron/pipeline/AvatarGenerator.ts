@@ -28,7 +28,7 @@ export interface AvatarGenerateParams {
 // Cloudflare quick tunnels drop any SINGLE request past ~100s (HTTP 524), so we
 // never hold one request open that long: submit returns instantly with a job id
 // and we poll a fast result endpoint until the mp4 is ready.
-const AVATAR_TIMEOUT_MS = 20 * 60 * 1000;
+const AVATAR_TIMEOUT_MS = 45 * 60 * 1000;
 // Gap between result polls.
 const POLL_INTERVAL_MS = 4000;
 // Cap each individual HTTP call so it never sits open near the tunnel's ~100s limit.

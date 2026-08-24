@@ -444,6 +444,7 @@ export class CommentatorPipeline {
             });
             log.info({ path: clips.segmentA }, 'Full commentary avatar generated successfully');
           } catch (errFull) {
+            avatarErrorMsg = errFull instanceof Error ? errFull.message : String(errFull);
             log.warn({ errFull }, 'Failed to generate Full commentary avatar clip');
           } finally {
             if (fullAudioPath !== ttsTrackPath) {
@@ -457,7 +458,9 @@ export class CommentatorPipeline {
           avatarClips = clips;
           log.info({ clips: Object.keys(clips).filter(k => (clips as any)[k]) }, 'Avatar clips available for compositing');
         } else {
-          avatarErrorMsg = 'All avatar segment clips failed to generate';
+          if (!avatarErrorMsg) {
+            avatarErrorMsg = 'All avatar segment clips failed to generate';
+          }
           avatarClips = undefined;
         }
       } catch (avErr) {
