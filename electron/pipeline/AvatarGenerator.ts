@@ -90,7 +90,7 @@ export class AvatarGenerator {
 		const submit = await this.submitJob(endpoint, body, deadline);
 		if (submit.mp4) {
 			// Backward-compat: an older server streamed the clip straight back.
-			fs.writeFileSync(outputPath, submit.mp4);
+			fs.writeFileSync(outputPath, new Uint8Array(submit.mp4));
 			return outputPath;
 		}
 		if (!submit.jobId) {
@@ -108,7 +108,7 @@ export class AvatarGenerator {
 			const poll = await this.pollResult(resultUrl, deadline);
 			if (poll.pending) continue;
 			if (poll.mp4) {
-				fs.writeFileSync(outputPath, poll.mp4);
+				fs.writeFileSync(outputPath, new Uint8Array(poll.mp4));
 				return outputPath;
 			}
 			throw new Error(poll.error || 'avatar generation failed');
